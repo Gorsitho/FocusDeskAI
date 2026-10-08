@@ -25,6 +25,8 @@ def describe_reason(reason: Reason | None) -> str:
         return tr("reason.no_movement", seconds=seconds)
     if reason.code is ReasonCode.PHONE:
         return tr("reason.phone", seconds=seconds)
+    if reason.code is ReasonCode.ON_DESK:
+        return tr("reason.on_desk")
     if reason.code is ReasonCode.LOOKING_AWAY:
         what = tr(f"attention.{reason.attention.value}") if reason.attention else tr("field.looking_away")
         return tr("reason.looking_away", what=what, seconds=seconds)
@@ -182,7 +184,7 @@ class Dashboard(QWidget):
             self.show_state(state_override, tr("reason.break"))
 
         attention = features.attention
-        good = {"on_screen": True, "absent": None}.get(attention.value, False)
+        good = {"on_screen": True, "desk": True, "absent": None}.get(attention.value, False)
         self._set_flag(self._attention, good, tr(f"attention.{attention.value}"))
         self._monitor.setText(_NO_VALUE if features.monitor is None else tr("monitor.n", n=features.monitor + 1))
         activity = features.activity

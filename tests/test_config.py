@@ -134,3 +134,41 @@ def test_settings_file_with_byte_order_mark_is_read(tmp_path):
     path.write_text('{"sound_volume": 33, "language": "es"}', encoding="utf-8-sig")
     user = load_user_settings(path)
     assert user.sound_volume == 33 and user.language == "es"
+
+
+# --- study method -----------------------------------------------------------------
+
+from app.config.settings import StudyMethod  # noqa: E402
+
+
+def test_study_method_defaults_to_computer(tmp_path):
+    assert UserSettings().study_method is StudyMethod.COMPUTER
+    assert load_user_settings(tmp_path / "missing.json").study_method is StudyMethod.COMPUTER
+
+
+@pytest.mark.parametrize("method", list(StudyMethod))
+def test_study_method_persists(tmp_path, method):
+    path = tmp_path / "user_settings.json"
+    assert save_user_settings(UserSettings(study_method=method), path)
+    assert json.loads(path.read_text(encoding="utf-8"))["study_method"] == method.value
+    assert load_user_settings(path).study_method is method
+
+
+@pytest.mark.parametrize("raw", ["phone", 3, None, ""])
+def test_invalid_study_method_falls_back_to_computer(tmp_path, raw):
+    path = tmp_path / "user_settings.json"
+    path.write_text(json.dumps({"study_method": raw, "sensitivity": 7}), encoding="utf-8")
+    loaded = load_user_settings(path)
+    assert loaded.study_method is StudyMethod.COMPUTER
+    assert loaded.sensitivity == 7
+
+
+def test_settings_without_study_method_use_computer(tmp_path):
+    path = tmp_path / "user_settings.json"
+    path.write_text(json.dumps({"language": "es"}), encoding="utf-8")
+    assert load_user_settings(path).study_method is StudyMethod.COMPUTER
+
+
+@pytest.mark.parametrize("method", list(StudyMethod))
+def test_apply_user_settings_maps_study_method(method):
+    assert apply_user_settings(Settings(), UserSettings(study_method=method)).features.study_method is method

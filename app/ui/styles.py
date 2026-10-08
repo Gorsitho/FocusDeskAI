@@ -110,6 +110,26 @@ QPushButton#Primary {{
 QPushButton#Primary:hover {{
     background-color: #6aa1ff;
 }}
+QPushButton#MethodCard {{
+    background-color: {SURFACE};
+    border: 2px solid {BORDER_STRONG};
+    border-radius: 12px;
+    padding: 14px;
+}}
+QPushButton#MethodCard:hover {{
+    border-color: {TEXT_MUTED};
+}}
+QPushButton#MethodCard:checked {{
+    background-color: {SURFACE_RAISED};
+    border-color: {ACCENT};
+}}
+QLabel#MethodIcon {{
+    font-size: 30px;
+}}
+QLabel#MethodTitle {{
+    font-size: 16px;
+    font-weight: 600;
+}}
 QPushButton#Segment {{
     padding: 6px 12px;
 }}

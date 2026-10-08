@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
-from app.config.settings import Settings, StateSettings
+from app.config.settings import Settings, StateSettings, StudyMethod
 from app.features.activity_features import ActivityFeatures, ActivityTracker
 from app.features.gaze_features import (
     Attention,
@@ -45,6 +45,7 @@ class ReasonCode(str, Enum):
     PHONE = "phone"
     LOOKING_AWAY = "looking_away"
     ON_MONITOR = "on_monitor"
+    ON_DESK = "on_desk"
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,8 @@ def classify(features: FrameFeatures, cfg: StateSettings) -> tuple[FocusState, R
         return FocusState.DISTRACTED, Reason(
             ReasonCode.LOOKING_AWAY, activity.seconds_looking_away, attention=features.attention
         )
+    if features.attention is Attention.DESK:
+        return FocusState.FOCUSED, Reason(ReasonCode.ON_DESK)
     return FocusState.FOCUSED, Reason(ReasonCode.ON_MONITOR, monitor=features.monitor)
 
 
@@ -161,6 +164,8 @@ class FeaturePipeline:
         self._out_of_view_monitor: int | None = None
         self._last_monitor: int | None = None
         self._last_yaw = 0.0
+        # The head pointed at the desk when the face was last seen (tablet / mixed study).
+        self._last_on_desk = False
         self._last_phone_gaze = -math.inf
         self._calibrator = PitchCalibrator(config.features)
         self.reconfigure(config)
@@ -170,6 +175,7 @@ class FeaturePipeline:
         self._config = config
         self._zones = compute_screen_zones(config.features)
         self._last_monitor = self._out_of_view_monitor = None
+        self._last_on_desk = False
 
     @property
     def screen_zones(self) -> ScreenZones:
@@ -184,6 +190,7 @@ class FeaturePipeline:
         objects: ObjectResult,
     ) -> FrameAnalysis:
         cfg = self._config
+        tablet = cfg.features.study_method is StudyMethod.TABLET
         raw_head = estimate_head_pose(face.transform) if face.detected else None
         smoothed = self._smoother.update(timestamp, raw_head)
         anchor = face_anchor(face.landmarks, frame_size) if face.detected else None
@@ -194,7 +201,8 @@ class FeaturePipeline:
                 towards_camera = relative_to_camera_line(
                     smoothed, anchor, frame_size, cfg.features.camera_vertical_fov
                 )
-            offset = self._calibrator.update(timestamp, towards_camera, self._zones)
+            # Without monitors there is no reference to learn the pitch bias from.
+            offset = 0.0 if tablet else self._calibrator.update(timestamp, towards_camera, self._zones)
             head_pose = HeadPose(towards_camera.yaw, towards_camera.pitch - offset, towards_camera.roll)
             # The phone is compared with its position in the image, i.e. relative to the
             # optical axis, so that check uses the uncorrected direction (minus the bias).
@@ -226,16 +234,22 @@ class FeaturePipeline:
             person, gaze, looking_at_phone, pose_features, self._zones, cfg.features.torso_margin
         )
         monitor = gaze.monitor
-        facing_screen = gaze.facing_screen
+        # Looking where the study method expects: a monitor, or the desk if allowed.
+        facing_screen = True if gaze.on_desk else gaze.facing_screen
         if head_pose is not None:
             self._last_monitor, self._last_yaw = monitor, head_pose.yaw
             self._out_of_view_monitor = None
+            self._last_on_desk = gaze.on_desk
         elif person and attention in (Attention.NO_FACE, Attention.BODY_TURNED):
             monitor = self._monitor_beyond_tracking()
             if monitor is not None:
                 attention, facing_screen = Attention.ON_SCREEN, True
+            elif attention is Attention.NO_FACE and self._last_on_desk:
+                # Bending further over a notebook often hides the face; keep crediting the desk.
+                attention, facing_screen = Attention.DESK, True
         else:
             self._last_monitor = self._out_of_view_monitor = None
+            self._last_on_desk = False
 
         tracking_points = ActivityTracker.tracking_points_from(
             pose.landmarks, face.landmarks, cfg.detection.min_landmark_visibility
@@ -248,7 +262,7 @@ class FeaturePipeline:
             face_detected=face.detected,
             phone_detected=phone_center is not None,
             head_pose=head_pose,
-            pitch_calibration=self._calibrator.offset,
+            pitch_calibration=0.0 if tablet else self._calibrator.offset,
             pose=pose_features,
             gaze=gaze,
             phone=PhoneFeatures(

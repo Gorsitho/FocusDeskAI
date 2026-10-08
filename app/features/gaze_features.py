@@ -12,7 +12,7 @@ from enum import Enum
 
 import numpy as np
 
-from app.config.settings import CameraEdge, FeatureSettings, MonitorPlacement, Workspace
+from app.config.settings import CameraEdge, FeatureSettings, MonitorPlacement, StudyMethod, Workspace
 from app.vision.head_pose import HeadPose
 
 _CAMERA_GAP = 0.02  # webcam distance from the monitor edge, metres
@@ -22,6 +22,7 @@ class Attention(str, Enum):
     """Where the user's attention appears to be in the current frame."""
 
     ON_SCREEN = "on_screen"
+    DESK = "desk"  # down at a tablet / notebook (only when the study method allows it)
     LEFT = "left"
     RIGHT = "right"
     DOWN = "down"
@@ -154,6 +155,8 @@ class GazeFeatures:
     looking_down: bool = False
     looking_up: bool = False
     head_tilted: bool = False
+    # Looking down at the desk, which counts as focused for tablet / mixed study.
+    on_desk: bool = False
     direction: Attention = Attention.NO_FACE
 
 
@@ -164,17 +167,32 @@ def extract_gaze_features(
         return GazeFeatures()
     zones = zones or compute_screen_zones(cfg)
 
+    method = cfg.study_method
     tilted = abs(head_pose.roll) > cfg.max_head_roll
-    monitor = None if tilted else zones.monitor_at(head_pose.yaw, head_pose.pitch)
-    turned_left = head_pose.yaw > zones.yaw_max
-    turned_right = head_pose.yaw < zones.yaw_min
-    down = head_pose.pitch < zones.pitch_min
-    up = head_pose.pitch > zones.pitch_max
+    if method is StudyMethod.TABLET:
+        # No monitors: directions are judged against the desk in front of the user.
+        monitor = None
+        turned_left = head_pose.yaw > cfg.desk_max_yaw
+        turned_right = head_pose.yaw < -cfg.desk_max_yaw
+        down = head_pose.pitch < cfg.desk_pitch_max
+        up = not down
+        on_desk = down and not (turned_left or turned_right)
+    else:
+        monitor = None if tilted else zones.monitor_at(head_pose.yaw, head_pose.pitch)
+        turned_left = head_pose.yaw > zones.yaw_max
+        turned_right = head_pose.yaw < zones.yaw_min
+        down = head_pose.pitch < zones.pitch_min
+        up = head_pose.pitch > zones.pitch_max
+        # Mixed: below the monitors, within their horizontal span, is the desk.
+        on_desk = method is StudyMethod.MIXED and down and not (turned_left or turned_right)
+    on_desk = on_desk and not tilted
 
     if monitor is not None:
         direction = Attention.ON_SCREEN
     elif tilted:
         direction = Attention.HEAD_TILTED
+    elif on_desk:
+        direction = Attention.DESK
     elif down:
         direction = Attention.DOWN
     elif turned_left:
@@ -193,6 +211,7 @@ def extract_gaze_features(
         looking_down=down,
         looking_up=up,
         head_tilted=tilted,
+        on_desk=on_desk,
         direction=direction,
     )
 

@@ -15,6 +15,7 @@ from app.config.settings import (
     CameraEdge,
     MonitorPlacement,
     Settings,
+    StudyMethod,
     Workspace,
     arc_layout,
 )
@@ -28,6 +29,7 @@ LANGUAGES = ("en", "es", "de")
 
 @dataclass(frozen=True)
 class UserSettings:
+    study_method: StudyMethod = StudyMethod.COMPUTER
     workspace: Workspace = field(default_factory=Workspace)
     distraction_after_s: float = 5.0
     phone_distraction_after_s: float = 3.0
@@ -46,6 +48,7 @@ class UserSettings:
         """Clamp every field into its valid range."""
         return dataclasses.replace(
             self,
+            study_method=_study_method(self.study_method),
             workspace=normalize_workspace(self.workspace),
             distraction_after_s=_clamp(self.distraction_after_s, 1.0, 600.0),
             phone_distraction_after_s=_clamp(self.phone_distraction_after_s, 1.0, 600.0),
@@ -57,6 +60,7 @@ class UserSettings:
 
     def to_dict(self) -> dict:
         data = dataclasses.asdict(self)
+        data["study_method"] = self.study_method.value
         ws = self.workspace
         data["workspace"] = {
             "person_x": ws.person_x,
@@ -150,6 +154,13 @@ def clamp_monitor(monitor: MonitorPlacement, person_x: float, person_z: float) -
     )
 
 
+def _study_method(value) -> StudyMethod:
+    try:
+        return StudyMethod(value)
+    except ValueError:
+        return StudyMethod.COMPUTER
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -194,6 +205,7 @@ def apply_user_settings(base: Settings, user: UserSettings) -> Settings:
     features = dataclasses.replace(
         base.features,
         workspace=user.workspace,
+        study_method=user.study_method,
         # Sensitivity 1 -> 20.4 deg tolerance, 5 -> 14 deg, 10 -> 6 deg.
         attention_margin=22.0 - 1.6 * s,
         # Sensitivity 1 -> 37 deg, 5 -> 45 deg, 10 -> 55 deg.

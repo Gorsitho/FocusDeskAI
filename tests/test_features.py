@@ -835,3 +835,150 @@ def test_phone_visible_alone_never_causes_phone_distraction():
         reasons.add(analysis.reason.code)
     assert analysis.state is FocusState.FOCUSED
     assert ReasonCode.PHONE not in reasons
+
+
+# --- study method -----------------------------------------------------------------
+
+from app.config.settings import StudyMethod  # noqa: E402
+
+
+def _method_cfg(method, **workspace):
+    features = dataclasses.replace(CFG.features, study_method=method, workspace=Workspace(**workspace))
+    return dataclasses.replace(CFG, features=features)
+
+
+PERSON = ObjectResult(person_detected=True)
+
+
+def test_computer_is_the_default_study_method():
+    assert CFG.features.study_method is StudyMethod.COMPUTER
+
+
+@pytest.mark.parametrize("head,attention", [
+    (HeadPose(0, -35, 0), Attention.DOWN),
+    (HeadPose(5, -3, 0), Attention.ON_SCREEN),
+    (HeadPose(60, 0, 0), Attention.LEFT),
+])
+def test_computer_gaze_is_unchanged(head, attention):
+    gaze = extract_gaze_features(head, _method_cfg(StudyMethod.COMPUTER).features)
+    assert gaze.direction is attention
+    assert not gaze.on_desk
+
+
+def test_computer_looking_down_still_distracts():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.COMPUTER))
+    analysis = _run(pipeline, 7.0, _face(pitch=-40), PERSON)
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.attention is Attention.DOWN
+
+
+@pytest.mark.parametrize("head,on_desk,attention", [
+    (HeadPose(0, -30, 0), True, Attention.DESK),
+    (HeadPose(-20, -45, 0), True, Attention.DESK),
+    (HeadPose(0, 0, 0), False, Attention.UP),  # straight ahead: no monitor to look at
+    (HeadPose(60, 0, 0), False, Attention.LEFT),
+    (HeadPose(-60, -30, 0), False, Attention.DOWN),  # down, but beside the desk
+    (HeadPose(0, -30, 50), False, Attention.HEAD_TILTED),
+])
+def test_tablet_gaze_counts_the_desk_only(head, on_desk, attention):
+    gaze = extract_gaze_features(head, _method_cfg(StudyMethod.TABLET).features)
+    assert gaze.on_desk is on_desk
+    assert gaze.direction is attention
+    assert gaze.monitor is None and not gaze.facing_screen
+
+
+def test_tablet_looking_down_stays_focused():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
+    analysis = _run(pipeline, 15.0, _face(pitch=-40), PERSON)
+    assert analysis.state is FocusState.FOCUSED
+    assert analysis.reason.code is ReasonCode.ON_DESK
+    assert analysis.features.attention is Attention.DESK
+    assert analysis.features.activity.seconds_looking_away == 0.0
+
+
+@pytest.mark.parametrize("face", [_face(yaw=60), _face()])
+def test_tablet_looking_up_or_away_distracts(face):
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
+    analysis = _run(pipeline, 7.0, face, PERSON)
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.code is ReasonCode.LOOKING_AWAY
+
+
+def test_tablet_face_lost_while_bent_over_the_desk_stays_focused():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
+    _run(pipeline, 3.0, _face(pitch=-40), PERSON)
+    analysis = _run(pipeline, 12.0, FaceResult(False), PERSON, start=3.0)
+    assert analysis.state is FocusState.FOCUSED
+    assert analysis.features.attention is Attention.DESK
+
+
+def test_face_lost_after_looking_away_is_not_credited_to_the_desk():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
+    _run(pipeline, 3.0, _face(yaw=60), PERSON)
+    analysis = _run(pipeline, 10.0, FaceResult(False), PERSON, start=3.0)
+    assert analysis.state is FocusState.DISTRACTED
+
+
+def test_tablet_phone_use_is_still_a_distraction():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
+    analysis = _run(pipeline, 5.0, _face(pitch=-40), _phone_below())
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.code is ReasonCode.PHONE
+
+
+def test_tablet_does_not_learn_a_pitch_bias_from_the_desk():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
+    analysis = _run(pipeline, 20.0, _face(pitch=-20), PERSON)
+    assert analysis.features.pitch_calibration == 0.0
+
+
+@pytest.mark.parametrize("head,attention,on_desk", [
+    (HeadPose(5, -3, 0), Attention.ON_SCREEN, False),
+    (HeadPose(0, -35, 0), Attention.DESK, True),
+    (HeadPose(60, 0, 0), Attention.LEFT, False),
+    (HeadPose(0, 30, 0), Attention.UP, False),
+])
+def test_mixed_gaze_counts_monitors_and_desk(head, attention, on_desk):
+    gaze = extract_gaze_features(head, _method_cfg(StudyMethod.MIXED).features)
+    assert gaze.direction is attention
+    assert gaze.on_desk is on_desk
+
+
+def test_mixed_desk_must_be_below_the_monitors():
+    cfg = _method_cfg(StudyMethod.MIXED).features
+    # Looking down but far beyond the monitors' horizontal span is not the desk.
+    assert not extract_gaze_features(HeadPose(70, -35, 0), cfg).on_desk
+
+
+@pytest.mark.parametrize("face,reason", [
+    (_face(pitch=-40), ReasonCode.ON_DESK),
+    (_face(), ReasonCode.ON_MONITOR),
+])
+def test_mixed_monitor_and_desk_both_stay_focused(face, reason):
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.MIXED))
+    analysis = _run(pipeline, 15.0, face, PERSON)
+    assert analysis.state is FocusState.FOCUSED
+    assert analysis.reason.code is reason
+
+
+def test_mixed_switching_between_monitor_and_desk_stays_focused():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.MIXED, monitors=arc_layout(2)))
+    start = 0.0
+    for face in (_face(), _face(pitch=-40), _face(yaw=-15), _face(pitch=-40)):
+        analysis = _run(pipeline, start + 4.0, face, PERSON, start=start)
+        start += 4.0
+        assert analysis.state is FocusState.FOCUSED
+
+
+def test_mixed_looking_sideways_still_distracts():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.MIXED))
+    analysis = _run(pipeline, 7.0, _face(yaw=60), PERSON)
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.code is ReasonCode.LOOKING_AWAY
+
+
+def test_study_method_change_applies_live():
+    pipeline = FeaturePipeline(_method_cfg(StudyMethod.COMPUTER))
+    assert _run(pipeline, 7.0, _face(pitch=-40), PERSON).state is FocusState.DISTRACTED
+    pipeline.reconfigure(_method_cfg(StudyMethod.TABLET))
+    assert _run(pipeline, 10.0, _face(pitch=-40), PERSON, start=7.0).state is FocusState.FOCUSED

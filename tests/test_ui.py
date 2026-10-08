@@ -374,3 +374,117 @@ def test_main_window_applies_landmark_setting_to_worker(qapp, monkeypatch):
     window.apply_user_settings(UserSettings(show_landmarks=True))
     assert window._worker.show_landmarks is True
     window.close()
+
+
+# --- study method -----------------------------------------------------------------
+
+from app.config.settings import StudyMethod  # noqa: E402
+
+
+def _click(button):
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+
+def test_setup_starts_with_the_study_method_and_defaults_to_computer(qapp):
+    dialog = SetupDialog(UserSettings())
+    assert dialog.page == SetupDialog.METHOD_PAGE
+    assert dialog.method_picker.method is StudyMethod.COMPUTER
+    assert dialog.method_picker.card(StudyMethod.COMPUTER).isChecked()
+    assert dialog._start.text() == "Next"
+
+
+@pytest.mark.parametrize("method", [StudyMethod.COMPUTER, StudyMethod.MIXED])
+def test_setup_shows_monitor_configuration_after_the_method(qapp, method):
+    dialog = SetupDialog(UserSettings())
+    dialog.show()
+    _click(dialog.method_picker.card(method))
+    _click(dialog._start)
+    assert dialog.page == SetupDialog.WORKSPACE_PAGE
+    assert dialog.result() != SetupDialog.DialogCode.Accepted
+    assert dialog._start.text() == "Start monitoring" and dialog._back.isVisible()
+    dialog.workspace_editor._monitor_group.button(2).click()
+    _click(dialog._start)
+    assert dialog.result() == SetupDialog.DialogCode.Accepted
+    result = dialog.result_settings()
+    assert result.study_method is method and result.workspace.monitor_count == 2
+
+
+def test_setup_back_returns_to_the_method(qapp):
+    dialog = SetupDialog(UserSettings())
+    dialog.show()
+    _click(dialog._start)
+    _click(dialog._back)
+    assert dialog.page == SetupDialog.METHOD_PAGE
+    assert not dialog._back.isVisible()
+
+
+def test_setup_skips_monitor_configuration_for_tablet(qapp):
+    workspace = Workspace(monitors=arc_layout(3))
+    dialog = SetupDialog(UserSettings(workspace=workspace))
+    dialog.show()
+    _click(dialog.method_picker.card(StudyMethod.TABLET))
+    assert dialog._start.text() == "Start monitoring"
+    _click(dialog._start)
+    assert dialog.result() == SetupDialog.DialogCode.Accepted
+    assert dialog.page == SetupDialog.METHOD_PAGE
+    result = dialog.result_settings()
+    assert result.study_method is StudyMethod.TABLET
+    assert result.workspace == workspace  # kept for switching back later
+
+
+def test_setup_preselects_the_saved_method(qapp):
+    dialog = SetupDialog(UserSettings(study_method=StudyMethod.MIXED))
+    assert dialog.method_picker.method is StudyMethod.MIXED
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("en", ["Computer", "Tablet / Notebook", "Mixed", "How do you study?", "Next"]),
+    ("es", ["Ordenador", "Tableta / Cuaderno", "Mixto", "¿Cómo estudias?", "Siguiente"]),
+    ("de", ["Computer", "Tablet / Heft", "Gemischt", "Wie lernst du?", "Weiter"]),
+])
+def test_study_method_step_in_each_language(qapp, code, expected):
+    dialog = SetupDialog(UserSettings(language=code))
+    texts = _visible_texts(dialog)
+    for word in expected:
+        assert word in texts, (code, word)
+
+
+def test_study_method_can_be_changed_in_settings_and_persists(qapp, tmp_path):
+    path = tmp_path / "user_settings.json"
+    dialog = SettingsDialog(UserSettings())
+    dialog.show()
+    assert dialog.method_picker.method is StudyMethod.COMPUTER
+    _click(dialog.method_picker.card(StudyMethod.MIXED))
+    _click(dialog._save)
+    save_user_settings(dialog.result_settings(), path)
+    saved = load_user_settings(path)
+    assert saved.study_method is StudyMethod.MIXED
+    reopened = SettingsDialog(saved)
+    assert reopened.method_picker.method is StudyMethod.MIXED
+    assert reopened.result_settings() == saved
+
+
+def test_settings_marks_monitor_layout_unneeded_for_tablet(qapp):
+    dialog = SettingsDialog(UserSettings(workspace=Workspace(monitors=arc_layout(2))))
+    dialog.show()
+    assert dialog.workspace_editor.isEnabled()
+    assert not dialog._workspace_unneeded.isVisible()
+    _click(dialog.method_picker.card(StudyMethod.TABLET))
+    assert not dialog.workspace_editor.isEnabled()
+    assert dialog._workspace_unneeded.isVisible()
+    assert dialog.result_settings().workspace.monitor_count == 2
+    _click(dialog.method_picker.card(StudyMethod.COMPUTER))
+    assert dialog.workspace_editor.isEnabled()
+
+
+def test_restore_defaults_keeps_the_study_method(qapp):
+    dialog = SettingsDialog(UserSettings(study_method=StudyMethod.TABLET))
+    dialog._restore_defaults()
+    assert dialog.result_settings().study_method is StudyMethod.TABLET
+
+
+def test_dashboard_shows_desk_focus(qapp):
+    dashboard = Dashboard()
+    features = FrameFeatures(timestamp=0.0, person_detected=True, attention=Attention.DESK)
+    dashboard.update_analysis(FrameAnalysis(features, FocusState.FOCUSED, Reason(ReasonCode.ON_DESK)))
+    assert dashboard._reason.text() == "Studying at the desk"

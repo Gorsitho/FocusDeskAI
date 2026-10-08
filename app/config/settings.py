@@ -47,6 +47,14 @@ class CameraEdge(str, Enum):
     RIGHT = "right"
 
 
+class StudyMethod(str, Enum):
+    """What the user studies with, i.e. which head directions count as focused."""
+
+    COMPUTER = "computer"  # looking at the configured monitors
+    TABLET = "tablet"  # looking down at a tablet or notebook on the desk
+    MIXED = "mixed"  # either of the above
+
+
 @dataclass(frozen=True)
 class MonitorPlacement:
     """A monitor in the top-down workspace plan.
@@ -135,6 +143,7 @@ class DetectionSettings:
 @dataclass(frozen=True)
 class FeatureSettings:
     workspace: Workspace = field(default_factory=Workspace)
+    study_method: StudyMethod = StudyMethod.COMPUTER
     # Vertical position of the monitor centres relative to the user's eyes (metres).
     monitor_center_height: float = -0.12
     # Fraction of a gaze shift performed by turning the head; the eyes do the rest.
@@ -155,6 +164,11 @@ class FeatureSettings:
     calibration_sample_every_s: float = 0.5
     calibration_max_error: float = 20.0
     calibration_max_offset: float = 15.0
+    # Tablet / notebook study: head pitch (degrees, relative to the line towards the
+    # camera) below which the user is looking down at the desk, and the largest head
+    # yaw that still counts as the desk in front of them.
+    desk_pitch_max: float = -12.0
+    desk_max_yaw: float = 40.0
     # Head roll beyond this (e.g. resting the head on a hand) counts as off-screen.
     max_head_roll: float = 35.0
     # Extra tolerance on top of the monitor zones for a turned torso (pose only).

@@ -6,6 +6,7 @@ import re
 from PySide6.QtCore import QLocale, Qt, Signal
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -17,10 +18,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app.config.settings import StudyMethod
 from app.config.user_settings import MAX_SENSITIVITY, MIN_SENSITIVITY, UserSettings
 from app.ui import i18n
 from app.ui.i18n import LANGUAGE_NAMES, tr
@@ -153,8 +156,68 @@ def _language_combo(selected: str) -> QComboBox:
     return combo
 
 
+_METHOD_ICONS = {StudyMethod.COMPUTER: "🖥️", StudyMethod.TABLET: "📓", StudyMethod.MIXED: "🖥️ 📓"}
+
+
+class StudyMethodPicker(QWidget):
+    """Three large selectable cards: Computer, Tablet / Notebook, Mixed."""
+
+    changed = Signal(object)  # StudyMethod
+
+    def __init__(self, method: StudyMethod, compact: bool = False, parent=None):
+        super().__init__(parent)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._texts: dict[StudyMethod, tuple[QLabel, QLabel]] = {}
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        for index, option in enumerate(StudyMethod):
+            card = QPushButton()
+            card.setObjectName("MethodCard")
+            card.setCheckable(True)
+            card.setMinimumHeight(90 if compact else 200)
+            icon, title, description = QLabel(_METHOD_ICONS[option]), QLabel(), _hint()
+            icon.setObjectName("MethodIcon")
+            title.setObjectName("MethodTitle")
+            title.setWordWrap(True)
+            card_layout = QVBoxLayout(card)
+            card_layout.setSpacing(6)
+            for label in (icon, title, description):
+                label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+                # Clicks on the texts must reach the card.
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                card_layout.addWidget(label)
+            card_layout.addStretch(1)
+            description.setVisible(not compact)
+            self._group.addButton(card, index)
+            self._texts[option] = (title, description)
+            layout.addWidget(card, 1)
+        self.set_method(method)
+        self._group.idClicked.connect(lambda _: self.changed.emit(self.method))
+        self.retranslate()
+
+    @property
+    def method(self) -> StudyMethod:
+        return list(StudyMethod)[max(self._group.checkedId(), 0)]
+
+    def set_method(self, method: StudyMethod) -> None:
+        self.card(method).setChecked(True)
+
+    def card(self, method: StudyMethod) -> QPushButton:
+        return self._group.button(list(StudyMethod).index(method))
+
+    def retranslate(self) -> None:
+        for option, (title, description) in self._texts.items():
+            title.setText(tr(f"method.{option.value}"))
+            description.setText(tr(f"method.{option.value}_desc"))
+            self.card(option).setToolTip(tr(f"method.{option.value}_desc"))
+
+
 class SetupDialog(QDialog):
-    """Shown at startup to describe the desk layout before monitoring begins."""
+    """Shown at startup: the study method first, then the desk layout when it is needed."""
+
+    METHOD_PAGE, WORKSPACE_PAGE = 0, 1
 
     def __init__(self, user: UserSettings, parent=None):
         super().__init__(parent)
@@ -168,23 +231,51 @@ class SetupDialog(QDialog):
         header = QHBoxLayout()
         header.addWidget(self._title, 1)
         header.addWidget(self._language)
+
+        # Step 1: study method.
+        self._method_title = QLabel()
+        self._method_title.setObjectName("MethodTitle")
+        self._method_intro = _hint()
+        self._picker = StudyMethodPicker(user.study_method)
+        self._picker.changed.connect(lambda _: self._update_buttons())
+        method_page = QWidget()
+        method_layout = QVBoxLayout(method_page)
+        method_layout.setContentsMargins(0, 0, 0, 0)
+        method_layout.setSpacing(12)
+        method_layout.addWidget(self._method_title)
+        method_layout.addWidget(self._method_intro)
+        method_layout.addWidget(self._picker)
+        method_layout.addStretch(1)
+
+        # Step 2: monitor layout (skipped for tablet / notebook study).
         self._intro = _hint()
         self._workspace = WorkspaceEditor(user.workspace)
+        workspace_page = QWidget()
+        workspace_layout = QVBoxLayout(workspace_page)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(12)
+        workspace_layout.addWidget(self._intro)
+        workspace_layout.addWidget(self._workspace, 1)
+
+        self._pages = QStackedWidget()
+        self._pages.addWidget(method_page)
+        self._pages.addWidget(workspace_page)
 
         buttons = QDialogButtonBox()
         self._start = buttons.addButton("", QDialogButtonBox.ButtonRole.AcceptRole)
         self._start.setObjectName("Primary")
         self._start.setDefault(True)
+        self._back = buttons.addButton("", QDialogButtonBox.ButtonRole.ActionRole)
         self._quit = buttons.addButton("", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(self.accept)
+        self._start.clicked.connect(self._on_primary)
+        self._back.clicked.connect(lambda: self._show_page(self.METHOD_PAGE))
         buttons.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 18)
         root.setSpacing(12)
         root.addLayout(header)
-        root.addWidget(self._intro)
-        root.addWidget(self._workspace, 1)
+        root.addWidget(self._pages, 1)
         root.addWidget(buttons)
         self.setMinimumSize(560, 640)
         self.retranslate()
@@ -193,6 +284,33 @@ class SetupDialog(QDialog):
     def workspace_editor(self) -> WorkspaceEditor:
         return self._workspace
 
+    @property
+    def method_picker(self) -> StudyMethodPicker:
+        return self._picker
+
+    @property
+    def page(self) -> int:
+        return self._pages.currentIndex()
+
+    def _needs_workspace(self) -> bool:
+        return self._picker.method is not StudyMethod.TABLET
+
+    def _on_primary(self) -> None:
+        if self.page == self.METHOD_PAGE and self._needs_workspace():
+            self._show_page(self.WORKSPACE_PAGE)
+        else:
+            self.accept()
+
+    def _show_page(self, page: int) -> None:
+        self._pages.setCurrentIndex(page)
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        on_method_page = self.page == self.METHOD_PAGE
+        next_step = on_method_page and self._needs_workspace()
+        self._start.setText(tr("setup.next") if next_step else tr("setup.start"))
+        self._back.setVisible(not on_method_page)
+
     def _on_language(self) -> None:
         i18n.set_language(self._language.currentData())
         self.retranslate()
@@ -200,15 +318,20 @@ class SetupDialog(QDialog):
     def retranslate(self) -> None:
         self.setWindowTitle(tr("setup.title"))
         self._title.setText(tr("setup.welcome"))
+        self._method_title.setText(tr("setup.method_title"))
+        self._method_intro.setText(tr("setup.method_intro"))
         self._intro.setText(tr("setup.intro"))
         self._language.setToolTip(tr("settings.language_label"))
-        self._start.setText(tr("setup.start"))
+        self._back.setText(tr("setup.back"))
         self._quit.setText(tr("setup.quit"))
+        self._picker.retranslate()
         self._workspace.retranslate()
+        self._update_buttons()
 
     def result_settings(self) -> UserSettings:
         return dataclasses.replace(
-            self._user, workspace=self._workspace.workspace, language=self._language.currentData(),
+            self._user, study_method=self._picker.method, workspace=self._workspace.workspace,
+            language=self._language.currentData(),
         ).normalized()
 
 
@@ -219,10 +342,19 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._user = user
 
+        # Study method.
+        self._picker = StudyMethodPicker(user.study_method, compact=True)
+        self._picker.changed.connect(lambda _: self._update_workspace_state())
+        self._method_box = QGroupBox()
+        QVBoxLayout(self._method_box).addWidget(self._picker)
+
         # Workspace.
         self._workspace = WorkspaceEditor(user.workspace)
+        self._workspace_unneeded = _hint()
         self._workspace_box = QGroupBox()
-        QVBoxLayout(self._workspace_box).addWidget(self._workspace)
+        workspace_layout = QVBoxLayout(self._workspace_box)
+        workspace_layout.addWidget(self._workspace_unneeded)
+        workspace_layout.addWidget(self._workspace)
 
         # Detection.
         self._distraction = SecondsInput(user.distraction_after_s, 1, 600, 0.5)
@@ -316,13 +448,25 @@ class SettingsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(14)
+        root.addWidget(self._method_box)
         root.addLayout(columns, 1)
         root.addWidget(buttons)
+        self._update_workspace_state()
         self.retranslate()
 
     @property
     def workspace_editor(self) -> WorkspaceEditor:
         return self._workspace
+
+    @property
+    def method_picker(self) -> StudyMethodPicker:
+        return self._picker
+
+    def _update_workspace_state(self) -> None:
+        # The layout is kept for switching back, but tablet study does not use it.
+        unneeded = self._picker.method is StudyMethod.TABLET
+        self._workspace.setEnabled(not unneeded)
+        self._workspace_unneeded.setVisible(unneeded)
 
     def _on_language(self) -> None:
         # Preview the language in this window; the caller applies or reverts it afterwards.
@@ -331,7 +475,10 @@ class SettingsDialog(QDialog):
 
     def retranslate(self) -> None:
         self.setWindowTitle(tr("settings.title"))
+        self._method_box.setTitle(tr("settings.study_method"))
+        self._picker.retranslate()
         self._workspace_box.setTitle(tr("settings.workspace"))
+        self._workspace_unneeded.setText(tr("settings.workspace_unneeded"))
         self._detection_box.setTitle(tr("settings.detection"))
         self._sound_box.setTitle(tr("settings.sound"))
         self._language_box.setTitle(tr("settings.language"))
@@ -360,7 +507,7 @@ class SettingsDialog(QDialog):
 
     def _restore_defaults(self) -> None:
         defaults = UserSettings()
-        # Workspace and language stay as they are: they describe the desk and the user.
+        # Study method, workspace and language stay as they are: they describe the desk and the user.
         self._distraction.setValue(defaults.distraction_after_s)
         self._phone.setValue(defaults.phone_distraction_after_s)
         self._no_movement.setValue(defaults.no_movement_away_after_s)
@@ -372,6 +519,7 @@ class SettingsDialog(QDialog):
         """Read every value from the widgets as they are shown right now."""
         return dataclasses.replace(
             self._user,
+            study_method=self._picker.method,
             workspace=self._workspace.workspace,
             distraction_after_s=self._distraction.value(),
             phone_distraction_after_s=self._phone.value(),

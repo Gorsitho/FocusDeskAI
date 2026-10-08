@@ -64,7 +64,7 @@ def draw_overlays(
         length = 0.25 * min(width, height)
         direction = np.array([np.sin(np.radians(head.yaw)), -np.sin(np.radians(head.pitch))])
         end = start + direction * length
-        on_screen = analysis.features.attention is Attention.ON_SCREEN
+        on_screen = analysis.features.attention in (Attention.ON_SCREEN, Attention.DESK)
         color = _ON_SCREEN_COLOR if on_screen else _OFF_SCREEN_COLOR
         cv2.arrowedLine(canvas, tuple(int(v) for v in start), tuple(int(v) for v in end), color, 2,
                         cv2.LINE_AA, tipLength=0.2)
