@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Downloaded / trained model files
+models/*
+!models/.gitkeep
+*.pt
+*.task
+
+# Experiment outputs
+experiments/*
+!experiments/.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
