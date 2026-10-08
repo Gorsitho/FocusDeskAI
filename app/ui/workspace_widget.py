@@ -1,7 +1,15 @@
-"""Visual editor for the 3D workspace: the user's seat and up to three monitors.
+"""
+This file contains the visual editor for the desk layout.
+The user can place themselves and up to three monitors, and choose where the
+webcam is mounted.
 
-The plan is a top view in metres (x to the user's right, z forward). The user
-and the monitors can be dragged, monitors rotated, and the camera mount chosen.
+* WorkspacePlan: the top view drawing, in metres (x goes to the user's right,
+  z goes forward). The user and the monitors can be dragged, and monitors can be rotated.
+* WorkspaceEditor: the drawing plus the buttons, lists and sliders around it.
+
+The result is a Workspace (app/config/settings.py). app/features/gaze_features.py
+uses it to know where the monitors are. The editor is shown in the setup and
+Settings windows (app/ui/settings_dialog.py).
 """
 
 import dataclasses

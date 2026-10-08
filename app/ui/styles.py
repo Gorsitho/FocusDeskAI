@@ -1,4 +1,8 @@
-"""Qt stylesheet and colour palette."""
+"""
+This file defines the look of the application: the colours and the Qt stylesheet.
+app/main.py sets APP_STYLESHEET once at startup, and then all windows use it.
+Some colours are also used directly by app/ui/dashboard.py and app/ui/workspace_widget.py.
+"""
 
 BACKGROUND = "#14161a"
 SURFACE = "#1d2026"

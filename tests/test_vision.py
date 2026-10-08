@@ -1,3 +1,8 @@
+"""
+Tests for app/vision/: head angles from the face transform, and the camera
+wrapper when no camera is open.
+"""
+
 import math
 
 import numpy as np

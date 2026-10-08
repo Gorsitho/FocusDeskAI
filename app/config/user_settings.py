@@ -1,4 +1,18 @@
-"""Preferences the user edits in the setup and Settings windows, persisted as JSON."""
+"""
+This file stores the preferences that the user can change in the app:
+study method, desk layout, waiting times, sensitivity, sound, display and language.
+
+Main responsibilities:
+
+* UserSettings: the preferences and their default values.
+* Loading and saving them as a JSON file (user_settings.json in %APPDATA%\\FocusDeskAI).
+  Wrong or missing values are ignored or corrected, so a broken file never stops the app.
+* apply_user_settings(): copies the preferences into the pipeline settings
+  from app/config/settings.py.
+
+It is used by app/main.py, app/ui/main_window.py, the setup and Settings windows
+(app/ui/settings_dialog.py) and the desk layout editor (app/ui/workspace_widget.py).
+"""
 
 import dataclasses
 import json
@@ -29,6 +43,10 @@ LANGUAGES = ("en", "es", "de")
 
 @dataclass(frozen=True)
 class UserSettings:
+    """The user's preferences, with their default values.
+
+    The object is frozen (it cannot be changed); dataclasses.replace() makes a changed copy.
+    """
     study_method: StudyMethod = StudyMethod.COMPUTER
     workspace: Workspace = field(default_factory=Workspace)
     distraction_after_s: float = 1.0
@@ -140,6 +158,7 @@ def normalize_workspace(ws: Workspace) -> Workspace:
 
 
 def clamp_monitor(monitor: MonitorPlacement, person_x: float, person_z: float) -> MonitorPlacement:
+    """Keep a monitor between the minimum and maximum distance from the user."""
     dx, dz = monitor.x - person_x, monitor.z - person_z
     distance = math.hypot(dx, dz)
     if distance < 1e-6:
@@ -166,6 +185,7 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 def default_settings_path() -> Path:
+    """Path of the JSON file that stores the user's preferences."""
     base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
     return Path(base) / "FocusDeskAI" / "user_settings.json"
 

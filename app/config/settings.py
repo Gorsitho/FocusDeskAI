@@ -1,9 +1,18 @@
-"""Central configuration for FocusDesk AI.
+"""
+This file holds the central configuration of FocusDesk AI.
+It defines the fixed numbers (limits, sizes, times) that the detection and the
+state rules use, so they can be changed in one place without changing the pipeline code.
 
-All thresholds used by the rule-based state logic live here so they can be
-tuned without touching the pipeline code. Values the user can change from the
-UI live in `app.config.user_settings` and are folded into these dataclasses
-with `apply_user_settings`.
+Main parts:
+
+* Workspace, MonitorPlacement, CameraEdge: the 3D desk layout (user, monitors, webcam).
+* StudyMethod: Computer, Tablet / Notebook or Mixed.
+* CameraSettings, ModelSettings, DetectionSettings, FeatureSettings, StateSettings:
+  the settings for each step of the pipeline, collected in Settings.
+
+The values that the user can change in the app live in app/config/user_settings.py.
+apply_user_settings() copies them into these settings.
+Almost every other module reads its settings from this file.
 """
 
 import math
@@ -105,6 +114,7 @@ def arc_layout(count: int, distance: float = DEFAULT_MONITOR_DISTANCE,
 
 @dataclass(frozen=True)
 class CameraSettings:
+    """Which webcam to use, its image size and frame rate."""
     index: int = 0
     width: int = 640
     height: int = 480
@@ -114,6 +124,7 @@ class CameraSettings:
 
 @dataclass(frozen=True)
 class ModelSettings:
+    """Where the AI model files are, and where to download them from."""
     face_landmarker_path: Path = field(default_factory=lambda: model_path("face_landmarker.task"))
     face_landmarker_url: str = (
         "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
@@ -130,6 +141,7 @@ class ModelSettings:
 
 @dataclass(frozen=True)
 class DetectionSettings:
+    """Confidence limits for the detectors and how often YOLO runs."""
     min_face_confidence: float = 0.5
     min_pose_confidence: float = 0.5
     yolo_confidence: float = 0.4
@@ -142,6 +154,7 @@ class DetectionSettings:
 
 @dataclass(frozen=True)
 class FeatureSettings:
+    """Numbers used to turn detections into features (head direction, phone, posture, timers)."""
     workspace: Workspace = field(default_factory=Workspace)
     study_method: StudyMethod = StudyMethod.COMPUTER
     # Vertical position of the monitor centres relative to the user's eyes (metres).
@@ -201,6 +214,7 @@ class FeatureSettings:
 @dataclass(frozen=True)
 class StateSettings:
     # Nobody visible for this long -> AWAY.
+    """Times used by the state rules: when the state becomes DISTRACTED or AWAY."""
     away_after_s: float = 3.0
     # Someone "visible" but without any movement for this long -> AWAY (an empty
     # chair, a coat or a photo that the detectors mistake for a person).
@@ -217,6 +231,7 @@ class StateSettings:
 
 @dataclass(frozen=True)
 class Settings:
+    """All pipeline settings together. The shared default instance is `settings` below."""
     camera: CameraSettings = field(default_factory=CameraSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     detection: DetectionSettings = field(default_factory=DetectionSettings)

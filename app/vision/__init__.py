@@ -1,4 +1,11 @@
-"""Computer-vision layer: camera access and per-frame detectors."""
+"""
+This package is the computer-vision layer of FocusDesk AI.
+It reads camera frames and finds the face, the body and objects (phone, person) in each frame.
+
+This file only contains ensure_model(), which downloads a model file once if it
+is missing. It is used by face_detection.py and pose_detection.py.
+The results of this package are used by app/features/feature_pipeline.py.
+"""
 
 import logging
 import urllib.request

@@ -1,4 +1,11 @@
-"""Side panel showing the current state, behaviour durations and detected signals."""
+"""
+This file builds the side panel of the main window.
+It shows the current state and the reason for it, the time spent in each state,
+how long each behaviour has lasted, and the detected signals (head angles, phone, posture).
+
+It turns the results of app/features/feature_pipeline.py into text in the
+current language (app/ui/i18n.py). It is used by app/ui/main_window.py.
+"""
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
@@ -16,6 +23,7 @@ def state_name(state: FocusState) -> str:
 
 
 def describe_reason(reason: Reason | None) -> str:
+    """Turn a Reason into a short text in the current language."""
     if reason is None:
         return ""
     seconds = format_seconds(reason.seconds, 0)
@@ -40,6 +48,7 @@ def _duration(value: float) -> str:
 
 
 class Dashboard(QWidget):
+    """Side panel with the state, the timers and the detected signals."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(280)
@@ -177,6 +186,7 @@ class Dashboard(QWidget):
             value.setStyleSheet(f"color: {text_color}; font-weight: {weight};")
 
     def update_analysis(self, analysis: FrameAnalysis, state_override: FocusState | None = None) -> None:
+        """Show the result of the newest frame. During a break, state_override is BREAK."""
         features = analysis.features
         if state_override is None:
             self.show_state(analysis.state, describe_reason(analysis.reason))

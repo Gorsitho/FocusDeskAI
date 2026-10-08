@@ -1,4 +1,15 @@
-"""Main window and the background thread that runs the vision pipeline."""
+"""
+This file contains the main window of FocusDesk AI and the background worker.
+
+* AnalysisWorker runs in its own thread, so the window never freezes. For every
+  camera frame it runs the detectors (app/vision/) and the FeaturePipeline
+  (app/features/feature_pipeline.py), and sends the image and the result to the window.
+* MainWindow shows the camera image (camera_widget.py) and the side panel
+  (dashboard.py). It also handles the START / STOP SESSION button, the Break
+  button, the Settings window, the distraction sound and the session log files.
+
+app/main.py creates it after the setup window.
+"""
 
 import dataclasses
 import logging
@@ -101,6 +112,7 @@ class AnalysisWorker(QThread):
             logger.info("Analysis worker stopped")
 
     def _run(self) -> None:
+        """Main loop: read a frame, run the detectors and the pipeline, and send the results."""
         cfg = self._config
         self.status_changed.emit(("status.loading", {}))
         face_detector = self._create(FaceDetector, "face")
@@ -116,6 +128,7 @@ class AnalysisWorker(QThread):
 
         try:
             while not self.isInterruptionRequested():
+                # 1. Make sure the camera is open; if not, wait and try again.
                 if not camera.is_open:
                     if not camera.open():
                         self.camera_unavailable.emit(("status.camera_unavailable", {"index": cfg.camera.index}))
@@ -123,6 +136,7 @@ class AnalysisWorker(QThread):
                         continue
                     self._emit_running_status()
 
+                # 2. Read the newest frame.
                 frame = camera.read()
                 if frame is None:
                     logger.warning("Camera %d returned no frame; reopening", cfg.camera.index)
@@ -134,6 +148,8 @@ class AnalysisWorker(QThread):
                 ts_ms = max(int(now * 1000), last_ts_ms + 1)
                 last_ts_ms = ts_ms
 
+                # 3. Run the detectors. YOLO is slow, so it only runs on every n-th frame;
+                #    the frames in between reuse its last result.
                 face = face_detector.detect(frame, ts_ms) if face_detector else FaceResult(detected=False)
                 pose = pose_detector.detect(frame, ts_ms) if pose_detector else PoseResult(detected=False)
                 object_detector = self._object_detector
@@ -145,15 +161,18 @@ class AnalysisWorker(QThread):
                     # lock on Windows, so it starts only once the camera is already streaming.
                     yolo_loader.start()
 
+                # 4. Use new settings from the Settings window, if there are any.
                 pending, self._pending_config = self._pending_config, None
                 if pending is not None:
                     pipeline.reconfigure(pending)
                     logger.info("Detection settings applied")
 
+                # 5. Turn the detections into features and a focus state.
                 height, width = frame.shape[:2]
                 analysis = pipeline.process(now, (width, height), face, pose, objects)
                 self._log_changes(analysis)
 
+                # 6. Send the image and the result to the window (Qt signals are thread-safe).
                 preview = compose_preview(frame, face, pose, objects, cfg.detection.min_landmark_visibility,
                                           analysis, self._show_landmarks)
                 self.frame_ready.emit(bgr_to_qimage(preview))
@@ -224,6 +243,7 @@ class AnalysisWorker(QThread):
 
 
 def render_message(message: tuple[str, dict]) -> str:
+    """Turn a status message (translation key, params) into text in the current language."""
     key, params = message
     if "detectors" in params:
         params = {"items": ", ".join(tr(f"detector.{name}") for name in params["detectors"])}
@@ -231,6 +251,10 @@ def render_message(message: tuple[str, dict]) -> str:
 
 
 class MainWindow(QMainWindow):
+    """The main window: camera image, side panel and buttons.
+
+    It starts the AnalysisWorker and reacts to its results.
+    """
     def __init__(
         self,
         config: Settings = settings,
@@ -435,6 +459,7 @@ class MainWindow(QMainWindow):
         self._sync_state()
 
     def _sync_state(self) -> None:
+        """Tell the session timers and the sound which state is shown now."""
         state = self.displayed_state
         changed = self._session.active and state is not self._session.current
         self._session.set_state(state)
@@ -476,6 +501,7 @@ class MainWindow(QMainWindow):
             self._sound.set_volume(self._user.sound_volume)
 
     def apply_user_settings(self, user: UserSettings) -> None:
+        """Use new preferences everywhere: language, detection, sound, and save them to the file."""
         self._user = user.normalized()
         logger.info("Settings applied: %s", self._user)
         i18n.set_language(self._user.language)
@@ -493,6 +519,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, tr("error.title"), tr("error.save_settings", path=self._settings_path))
 
     def closeEvent(self, event) -> None:
+        """Save a running session and stop the worker thread before the window closes."""
         if not self._closing:
             self._closing = True
             # An open session is completed and saved rather than lost.

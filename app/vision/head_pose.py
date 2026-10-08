@@ -1,4 +1,10 @@
-"""Head orientation (yaw, pitch, roll) from the MediaPipe facial transform."""
+"""
+This file calculates the head direction (yaw, pitch, roll) from the MediaPipe face transform.
+The angles are in degrees; 0/0/0 means looking straight at the camera.
+
+It gets the transform from app/vision/face_detection.py. The angles are used by
+app/features/feature_pipeline.py, gaze_features.py and phone_features.py.
+"""
 
 import math
 from dataclasses import dataclass
@@ -36,6 +42,7 @@ def rotation_to_euler(rotation: np.ndarray) -> tuple[float, float, float]:
 
 
 def estimate_head_pose(transform: np.ndarray | None) -> HeadPose | None:
+    """Turn the MediaPipe face transform into head angles. Returns None without a transform."""
     if transform is None:
         return None
     rotation = np.asarray(transform, dtype=np.float64)[:3, :3]

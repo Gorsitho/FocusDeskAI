@@ -1,4 +1,11 @@
-"""Posture features from upper-body pose landmarks."""
+"""
+This file reads the user's posture from body points (nose and shoulders).
+It finds out if the user sits upright, slouches or leans, and how far the upper body is turned.
+
+The body points come from app/vision/pose_detection.py. The results are used by
+app/features/feature_pipeline.py and app/features/phone_features.py
+(for example, a dropped head can mean a phone in the lap).
+"""
 
 import math
 from dataclasses import dataclass
@@ -11,6 +18,7 @@ from app.vision.pose_detection import PoseLandmark, PoseResult
 
 
 class Posture(str, Enum):
+    """The postures that can be detected."""
     UPRIGHT = "Upright"
     SLOUCHING = "Slouching"
     LEANING = "Leaning"
@@ -19,6 +27,7 @@ class Posture(str, Enum):
 
 @dataclass
 class PoseFeatures:
+    """Posture values for one frame."""
     posture: Posture = Posture.UNKNOWN
     # Angle of the shoulder line relative to horizontal, in degrees.
     shoulder_tilt: float | None = None
@@ -37,6 +46,10 @@ def extract_pose_features(
     feature_cfg: FeatureSettings,
     detection_cfg: DetectionSettings,
 ) -> PoseFeatures:
+    """Calculate posture values from the nose and shoulder points.
+
+    Returns empty values when these points are not visible enough.
+    """
     if not pose.detected or pose.landmarks is None:
         return PoseFeatures()
 
@@ -82,6 +95,7 @@ def classify_posture(
     head_offset_ratio: float,
     cfg: FeatureSettings,
 ) -> Posture:
+    """Choose the posture (slouching, leaning or upright) from the measured values."""
     if head_height_ratio < cfg.min_head_height_ratio:
         return Posture.SLOUCHING
     if shoulder_tilt > cfg.max_shoulder_tilt or abs(head_offset_ratio) > cfg.max_head_offset_ratio:

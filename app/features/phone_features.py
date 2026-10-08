@@ -1,7 +1,19 @@
-"""Phone features: is a phone visible, and is the user actually looking at it?
+"""
+This file decides if a phone is visible and if the user is really looking at it.
 
-A phone lying on the desk is not a distraction by itself. It only matters when
-the head is turned away from every monitor *towards* the phone's bounding box.
+A phone lying on the desk is not a distraction by itself. It only counts when
+the head is turned away from every monitor and points *towards* the phone.
+A phone held up close to the face also counts, even in front of a monitor.
+
+Main parts:
+
+* PhoneTracker: keeps the last phone position for a short time, because YOLO
+  sometimes misses the phone in single frames.
+* is_looking_at_phone(): compares the direction of the nose with the position
+  of the phone in the image.
+
+It uses the phone boxes from app/vision/object_detection.py and the monitor
+zones from app/features/gaze_features.py. It is used by app/features/feature_pipeline.py.
 """
 
 import math
@@ -22,6 +34,7 @@ NOSE_TIP = 1
 
 @dataclass
 class PhoneFeatures:
+    """Phone information for one frame."""
     visible: bool = False
     # Centre of the phone box in pixels of the raw (non-mirrored) frame.
     center: tuple[float, float] | None = None

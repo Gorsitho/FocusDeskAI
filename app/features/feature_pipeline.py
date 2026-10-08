@@ -1,4 +1,21 @@
-"""Combines per-frame detections into features and a rule-based focus state."""
+"""
+This file is the "brain" of FocusDesk AI.
+For every camera frame, it combines the detector results into features and
+decides the focus state: FOCUSED, DISTRACTED or AWAY.
+(BREAK is never decided here; the user sets it with the Break button.)
+
+How it works:
+
+1. FeaturePipeline.process() gets the face, pose and object results from app/vision/.
+2. It calculates the head direction (gaze_features.py), phone use (phone_features.py),
+   posture (pose_features.py) and how long each behaviour lasts (activity_features.py).
+3. classify() applies the state rules in order of priority.
+4. StateStabilizer shows a new state only after it has lasted for a short time,
+   so the state does not flicker.
+
+The background worker in app/ui/main_window.py calls it for every frame.
+The result (FrameAnalysis) is shown by app/ui/dashboard.py and app/ui/camera_widget.py.
+"""
 
 import math
 from dataclasses import dataclass, field
@@ -32,6 +49,7 @@ from app.vision.pose_detection import PoseResult
 
 
 class FocusState(str, Enum):
+    """The states that the app can show."""
     FOCUSED = "FOCUSED"
     DISTRACTED = "DISTRACTED"
     AWAY = "AWAY"
@@ -40,6 +58,7 @@ class FocusState(str, Enum):
 
 
 class ReasonCode(str, Enum):
+    """Short codes that explain why a state was chosen."""
     ABSENT = "absent"
     NO_MOVEMENT = "no_movement"
     PHONE = "phone"
@@ -60,6 +79,7 @@ class Reason:
 
 @dataclass
 class FrameFeatures:
+    """Everything the pipeline found out about one frame."""
     timestamp: float
     person_detected: bool = False
     face_detected: bool = False
@@ -81,6 +101,7 @@ class FrameFeatures:
 
 @dataclass
 class FrameAnalysis:
+    """Final result for one frame: the features, the state to show and the reason for it."""
     features: FrameFeatures
     state: FocusState
     reason: Reason | None = None
@@ -136,6 +157,7 @@ def resolve_attention(
     person: bool, gaze: GazeFeatures, looking_at_phone: bool, pose: PoseFeatures, zones: ScreenZones,
     torso_margin: float,
 ) -> Attention:
+    """Decide where the user's attention is in this frame (monitor, phone, left, no face, ...)."""
     if not person:
         return Attention.ABSENT
     if looking_at_phone:
@@ -151,6 +173,11 @@ def resolve_attention(
 
 
 class FeaturePipeline:
+    """Turns the detector results of each frame into features and a focus state.
+
+    It remembers information between frames (smoothing, timers), so one instance
+    is used for the whole video.
+    """
     def __init__(self, config: Settings):
         self._activity = ActivityTracker(
             config.features, config.detection, config.state.still_motion_threshold
@@ -191,8 +218,11 @@ class FeaturePipeline:
         pose: PoseResult,
         objects: ObjectResult,
     ) -> FrameAnalysis:
+        """Analyse one frame and return its features, the state to show and the reason."""
         cfg = self._config
         tablet = cfg.features.study_method is StudyMethod.TABLET
+        # Step 1: head direction. Smooth it, measure it from the camera line and
+        # remove the learned up/down error.
         raw_head = estimate_head_pose(face.transform) if face.detected else None
         smoothed = self._smoother.update(timestamp, raw_head)
         anchor = face_anchor(face.landmarks, frame_size) if face.detected else None
@@ -209,11 +239,13 @@ class FeaturePipeline:
             # The phone is compared with its position in the image, i.e. relative to the
             # optical axis, so that check uses the uncorrected direction (minus the bias).
             phone_direction = HeadPose(smoothed.yaw, smoothed.pitch - offset, smoothed.roll)
+        # Step 2: where the user looks (monitor, desk, left, ...), posture, and is anybody there.
         gaze = extract_gaze_features(head_pose, cfg.features, self._zones, self._gaze_monitor)
         self._gaze_monitor = gaze.monitor
         pose_features = extract_pose_features(pose, frame_size, cfg.features, cfg.detection)
         person = pose.detected or face.detected or objects.person_detected
 
+        # Step 3: phone. A visible phone only counts if the head points towards it.
         phone_center = self._phone.update(timestamp, objects)
         near_face = phone_near_face(
             self._phone.box, face.landmarks if face.detected else None, frame_size, cfg.features
@@ -233,6 +265,8 @@ class FeaturePipeline:
             phone_gaze_angle(phone_center, phone_direction, anchor, cfg.features)
             if phone_center is not None and phone_direction is not None and anchor is not None else None
         )
+        # Step 4: combine everything into one attention value. When the face is lost,
+        # use what the user was looking at just before (far monitor or desk).
         attention = resolve_attention(
             person, gaze, looking_at_phone, pose_features, self._zones, cfg.features.torso_margin
         )
@@ -254,6 +288,7 @@ class FeaturePipeline:
             self._last_monitor = self._out_of_view_monitor = None
             self._last_on_desk = False
 
+        # Step 5: update the behaviour timers (looking away, phone, no movement).
         tracking_points = ActivityTracker.tracking_points_from(
             pose.landmarks, face.landmarks, cfg.detection.min_landmark_visibility
         )
@@ -276,6 +311,8 @@ class FeaturePipeline:
             monitor=monitor,
             activity=activity,
         )
+        # Step 6: apply the state rules, then only switch the shown state once the
+        # new state has lasted long enough (no flicker).
         candidate, reason = classify(features, cfg.state)
         self._reasons[candidate] = reason
         state = self._stabilizer.update(candidate, timestamp)

@@ -1,4 +1,8 @@
-"""Widget-level tests; they run without a display using Qt's offscreen platform."""
+"""
+Tests for the user interface in app/ui/: the setup and Settings windows, the
+desk layout editor, the dashboard, the translations, the sound and the camera overlay.
+They run without a screen, using Qt's "offscreen" mode.
+"""
 
 import io
 import math

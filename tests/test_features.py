@@ -1,3 +1,10 @@
+"""
+Tests for the detection logic in app/features/.
+They check posture, head direction, monitor zones, phone use, timers, the state
+rules and the three study methods. Many tests run the full FeaturePipeline with
+fake face, pose and object results, so no camera is needed.
+"""
+
 import dataclasses
 import math
 

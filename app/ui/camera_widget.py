@@ -1,4 +1,11 @@
-"""Camera preview widget and the overlay drawing used for it."""
+"""
+This file shows the camera image in the main window.
+It can also draw the detection markers on the image: face points, body points,
+phone boxes and an arrow for the head direction.
+
+It uses the detector results from app/vision/ and the FrameAnalysis from
+app/features/feature_pipeline.py. It is used by app/ui/main_window.py.
+"""
 
 import cv2
 import numpy as np
@@ -73,6 +80,7 @@ def draw_overlays(
 
 
 def bgr_to_qimage(frame: np.ndarray) -> QImage:
+    """Convert an OpenCV image (BGR colours) into a QImage that Qt can show."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     height, width = rgb.shape[:2]
     # copy() detaches the QImage from the numpy buffer, which is freed after this call.
@@ -80,6 +88,7 @@ def bgr_to_qimage(frame: np.ndarray) -> QImage:
 
 
 class CameraWidget(QLabel):
+    """Shows the camera image (scaled to fit), or a text message when there is no image."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("CameraView")

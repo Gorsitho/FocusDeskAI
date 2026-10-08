@@ -1,4 +1,11 @@
-"""Soft repeating chime played while the user is distracted."""
+"""
+This file plays a soft, repeating chime while the user is DISTRACTED.
+The sound is created in code (no sound file is shipped), saved to the temp
+folder and played with Qt.
+
+app/ui/main_window.py turns the sound on and off when the state changes.
+The "Test" button in the Settings window also uses it.
+"""
 
 import io
 import logging

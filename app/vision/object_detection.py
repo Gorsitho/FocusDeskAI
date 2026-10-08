@@ -1,4 +1,12 @@
-"""Cell phone and person detection with Ultralytics YOLO (COCO classes)."""
+"""
+This file finds phones and people in a camera frame with Ultralytics YOLO
+(using the COCO object classes). If YOLO cannot be loaded (for example, torch is
+missing), the detector turns itself off and the rest of the app keeps working
+without phone detection.
+
+The background worker in app/ui/main_window.py uses it. The results are used by
+app/features/feature_pipeline.py and app/features/phone_features.py.
+"""
 
 import logging
 from dataclasses import dataclass, field
@@ -15,6 +23,7 @@ COCO_CELL_PHONE = 67
 
 @dataclass
 class Detection:
+    """One object found by YOLO."""
     label: str
     confidence: float
     # Pixel coordinates x1, y1, x2, y2.
@@ -23,6 +32,7 @@ class Detection:
 
 @dataclass
 class ObjectResult:
+    """All objects found by YOLO in one frame."""
     phone_detected: bool = False
     person_detected: bool = False
     detections: list[Detection] = field(default_factory=list)

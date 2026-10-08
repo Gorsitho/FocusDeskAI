@@ -1,6 +1,13 @@
-"""FocusDesk AI entry point.
+"""
+This file starts FocusDesk AI. It is the entry point of the application.
 
-Run from the project root with either:
+What it does, in this order:
+1. It sets up logging first, so every later error is saved to the log file.
+2. It loads the user's saved preferences (app/config/user_settings.py).
+3. It shows the setup window (app/ui/settings_dialog.py): study method and desk layout.
+4. It saves the choices and opens the main window (app/ui/main_window.py).
+
+Run it from the project root with either:
     python -m app.main
     python app/main.py
 """
@@ -39,10 +46,12 @@ _QT_LEVELS = {
 
 
 def _qt_message_handler(msg_type, context, message) -> None:
+    """Send Qt's own warnings and messages to our log."""
     logging.getLogger("qt").log(_QT_LEVELS.get(msg_type, logging.WARNING), message)
 
 
 def main() -> int:
+    """Start the app: setup window first, then the main window. Returns the exit code."""
     log_startup()
     qInstallMessageHandler(_qt_message_handler)
     exit_code = 1

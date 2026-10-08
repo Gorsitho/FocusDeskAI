@@ -1,9 +1,16 @@
-"""Accumulated time spent in each focus state during a session."""
+"""
+This file adds up the time spent in each focus state (FOCUSED, DISTRACTED, AWAY, BREAK).
+It also formats a duration for the screen as MM:SS or H:MM:SS.
+
+It is used by app/features/session.py for the session totals, and by
+app/ui/dashboard.py and app/ui/main_window.py to show the timers.
+"""
 
 from app.features.feature_pipeline import FocusState
 
 
 class StateTimers:
+    """Adds up how long each state was active. The caller reports every state change with update()."""
     def __init__(self, now: float):
         self.reset(now)
 

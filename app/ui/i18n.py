@@ -1,8 +1,11 @@
-"""User-interface translations (English, Spanish, German).
+"""
+This file contains all texts of the user interface in English, Spanish and German.
 
-Every visible string goes through `tr(key, **params)`. The active language is
-process-wide; widgets re-read their texts in a `retranslate()` method when it
-changes.
+Every text that the user can see is read with `tr(key, **params)`.
+Only one language is active at a time, for the whole app. When the user changes
+the language, each window calls its `retranslate()` method to read its texts again.
+
+It is used by all files in app/ui/ and by app/main.py.
 """
 
 LANGUAGE_NAMES = {"en": "English", "es": "Español", "de": "Deutsch"}
@@ -20,6 +23,10 @@ def language() -> str:
 
 
 def tr(key: str, **params) -> str:
+    """Return the text for `key` in the current language (English if it is missing).
+
+    `params` fill the {placeholders} in the text.
+    """
     text = _STRINGS[_current].get(key) or _STRINGS["en"][key]
     return text.format(**params) if params else text
 

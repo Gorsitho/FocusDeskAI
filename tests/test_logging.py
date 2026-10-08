@@ -1,3 +1,8 @@
+"""
+Tests for app/logging_setup.py: where the log file is, what each line contains,
+logged errors in all threads, and the app without console streams (like the .exe build).
+"""
+
 import faulthandler
 import logging
 import os

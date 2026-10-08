@@ -1,9 +1,21 @@
-"""Screen-attention features derived from head orientation and the 3D monitor layout.
+"""
+This file decides where the user is looking: at a monitor, at the desk, or somewhere else.
+It uses the head direction (yaw, pitch, roll) and the 3D desk layout.
 
-The workspace (see `Workspace`) places the user's eyes and every monitor in
-metres. Each monitor rectangle is projected to the head angles needed to look
-at it, measured relative to the camera like MediaPipe's head pose: looking
-straight into the camera is yaw = pitch = 0.
+How it works:
+
+* The workspace (Workspace in app/config/settings.py) places the user's eyes
+  and every monitor in metres.
+* compute_screen_zones() turns each monitor into the range of head angles that
+  are needed to look at it (a "monitor zone"). Angles are measured from the
+  camera, like MediaPipe's head pose: looking straight into the camera is yaw = pitch = 0.
+* extract_gaze_features() compares the current head angles with these zones.
+  It also follows the study method: for Tablet / Notebook and Mixed, looking
+  down counts as looking at the desk.
+* HeadPoseSmoother makes the head angles calmer (less jitter), and
+  PitchCalibrator learns the small up/down error of each user and camera.
+
+It is used by app/features/feature_pipeline.py and app/features/phone_features.py.
 """
 
 import math
@@ -54,6 +66,7 @@ class MonitorZone:
 
 @dataclass(frozen=True)
 class ScreenZones:
+    """The zones of all monitors, plus the tolerance (margin) around each of them."""
     monitors: tuple[MonitorZone, ...]
     margin: float
 
@@ -93,6 +106,7 @@ def monitor_center(monitor: MonitorPlacement, cfg: FeatureSettings) -> np.ndarra
 
 
 def camera_point(workspace: Workspace, cfg: FeatureSettings) -> np.ndarray:
+    """3D position of the webcam, from its monitor and the edge it is mounted on."""
     monitor = workspace.monitors[workspace.camera_monitor]
     center, right = monitor_center(monitor, cfg), _monitor_axes(monitor)
     up = np.array([0.0, 1.0, 0.0])
@@ -129,6 +143,7 @@ def head_angles_towards(point: np.ndarray, workspace: Workspace, cfg: FeatureSet
 
 
 def compute_screen_zones(cfg: FeatureSettings) -> ScreenZones:
+    """Calculate the head angles that are needed to look at each monitor (one zone per monitor)."""
     workspace = cfg.workspace
     zones = []
     for index, monitor in enumerate(workspace.monitors):
@@ -148,6 +163,7 @@ def compute_screen_zones(cfg: FeatureSettings) -> ScreenZones:
 @dataclass
 class GazeFeatures:
     # None when the head pose is unknown (no face).
+    """Where the user is looking in one frame (made by extract_gaze_features)."""
     facing_screen: bool | None = None
     # Index of the monitor being looked at.
     monitor: int | None = None

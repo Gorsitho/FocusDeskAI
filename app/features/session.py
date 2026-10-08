@@ -1,7 +1,14 @@
-"""A work session: started with START, ended with STOP SESSION.
+"""
+This file controls a work session. A session starts when the user presses
+START and ends with STOP SESSION. During a session it adds up how long the
+user was in each state.
 
-Durations always come from a monotonic clock (immune to clock changes); the
-wall clock is only used for the start/end timestamps written to the log.
+Durations are measured with a monotonic clock, which does not jump when the
+computer's clock changes. The normal clock is only used for the start and end
+times that are written to the log.
+
+It uses StateTimers from app/features/state_timers.py. app/ui/main_window.py
+controls it, and app/data/session_log.py saves its result (SessionSummary).
 """
 
 import time
@@ -19,6 +26,7 @@ def _local_now() -> datetime:
 
 @dataclass(frozen=True)
 class SessionSummary:
+    """Result of a finished session: number, start, end and the time spent in each state."""
     number: int
     started_at: datetime
     ended_at: datetime

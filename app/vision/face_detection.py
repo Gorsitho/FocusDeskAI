@@ -1,4 +1,10 @@
-"""Face landmark detection with the MediaPipe Face Landmarker task."""
+"""
+This file finds the user's face in a camera frame with MediaPipe Face Landmarker.
+It returns 478 face points and a 3D transform of the head.
+
+app/vision/head_pose.py turns the transform into head angles. The background
+worker in app/ui/main_window.py uses this detector.
+"""
 
 import logging
 from dataclasses import dataclass
@@ -16,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FaceResult:
+    """Result of face detection for one frame."""
     detected: bool
     # (478, 3) normalised x, y in [0, 1] and relative depth z.
     landmarks: np.ndarray | None = None
@@ -24,6 +31,7 @@ class FaceResult:
 
 
 class FaceDetector:
+    """Runs MediaPipe Face Landmarker on video frames."""
     def __init__(self, models: ModelSettings, detection: DetectionSettings):
         model_path = ensure_model(models.face_landmarker_path, models.face_landmarker_url)
         options = vision.FaceLandmarkerOptions(

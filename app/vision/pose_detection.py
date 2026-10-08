@@ -1,4 +1,10 @@
-"""Body pose detection with the MediaPipe Pose Landmarker task."""
+"""
+This file finds the user's body points (nose, ears, shoulders, hips) in a camera
+frame with MediaPipe Pose Landmarker.
+
+The background worker in app/ui/main_window.py uses it. The points are used by
+app/features/pose_features.py and, to measure movement, by app/features/activity_features.py.
+"""
 
 import logging
 from dataclasses import dataclass
@@ -29,12 +35,14 @@ class PoseLandmark(IntEnum):
 
 @dataclass
 class PoseResult:
+    """Result of pose detection for one frame."""
     detected: bool
     # (33, 4) normalised x, y, z and visibility.
     landmarks: np.ndarray | None = None
 
 
 class PoseDetector:
+    """Runs MediaPipe Pose Landmarker on video frames."""
     def __init__(self, models: ModelSettings, detection: DetectionSettings):
         model_path = ensure_model(models.pose_landmarker_path, models.pose_landmarker_url)
         options = vision.PoseLandmarkerOptions(

@@ -1,4 +1,17 @@
-"""Startup setup window and the Settings window."""
+"""
+This file contains the setup window (shown at start) and the Settings window.
+
+* SetupDialog: step 1 asks for the study method (Computer, Tablet / Notebook, Mixed).
+  Step 2 shows the monitor setup. Step 2 is skipped for Tablet / Notebook.
+* SettingsDialog: lets the user change the study method, desk layout, waiting
+  times, sensitivity, sound, display and language later.
+* StudyMethodPicker: the three large cards for choosing the study method.
+* SecondsInput: a field for seconds that accepts both "7.5" and "7,5".
+
+Both windows return a UserSettings object (app/config/user_settings.py).
+The desk layout editor comes from app/ui/workspace_widget.py.
+They are opened by app/main.py and app/ui/main_window.py.
+"""
 
 import dataclasses
 import re
@@ -337,6 +350,7 @@ class SetupDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
+    """The Settings window. Changes are only used when the user presses Save."""
     preview_sound = Signal(int)  # volume percent
 
     def __init__(self, user: UserSettings, parent=None):

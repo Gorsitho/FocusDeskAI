@@ -1,3 +1,9 @@
+"""
+Tests for work sessions: app/features/session.py, app/data/session_log.py and the
+START / STOP SESSION handling in app/ui/main_window.py.
+A fake clock is used, so the tests never have to wait.
+"""
+
 import os
 import re
 from datetime import datetime, timedelta, timezone

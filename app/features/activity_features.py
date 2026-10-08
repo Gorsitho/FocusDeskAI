@@ -1,4 +1,17 @@
-"""Temporal features: behaviour durations, motion level and presence."""
+"""
+This file measures behaviour over time, not in a single frame.
+It answers questions like: How long has the user been looking away?
+How long at the phone? When was a person last seen? Is anything moving?
+
+Main parts:
+
+* BehaviorTimer: measures how long a behaviour lasts. Very short breaks
+  (shorter than a "grace" time) pause the timer instead of resetting it.
+* ActivityTracker: uses these timers and the movement of the body and face points.
+
+It is used by app/features/feature_pipeline.py. The state rules in that file
+make their decisions with these durations (ActivityFeatures).
+"""
 
 import math
 from collections import deque
@@ -14,6 +27,7 @@ _UPPER_BODY = slice(0, 13)
 
 @dataclass
 class ActivityFeatures:
+    """Durations and movement values for one frame (made by ActivityTracker)."""
     seconds_since_person_seen: float = 0.0
     # Time the person has been present but looking away from the monitors.
     seconds_looking_away: float = 0.0
@@ -53,6 +67,7 @@ class BehaviorTimer:
 
 
 class ActivityTracker:
+    """Keeps the history that is needed to measure how long behaviours last and how much the user moves."""
     def __init__(self, feature_cfg: FeatureSettings, detection_cfg: DetectionSettings, still_threshold: float):
         self._window = feature_cfg.history_window_s
         self._min_visibility = detection_cfg.min_landmark_visibility
@@ -74,6 +89,7 @@ class ActivityTracker:
         looking_at_phone: bool,
         tracking_points: np.ndarray | None,
     ) -> ActivityFeatures:
+        """Update all timers with the newest frame and return the current values."""
         if person_present:
             self._last_person_time = timestamp
 

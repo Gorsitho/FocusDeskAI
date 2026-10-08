@@ -1,3 +1,9 @@
+"""
+Tests for the configuration: app/config/settings.py and app/config/user_settings.py.
+They check default values, saving and loading the settings file, wrong values,
+settings files from older versions, and how the user's preferences are applied.
+"""
+
 import json
 import math
 

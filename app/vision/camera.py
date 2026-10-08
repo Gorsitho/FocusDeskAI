@@ -1,4 +1,10 @@
-"""Thin wrapper around cv2.VideoCapture."""
+"""
+This file opens the webcam and reads frames from it with OpenCV.
+If the camera is not available, read() returns None and the caller tries again later.
+
+It uses CameraSettings from app/config/settings.py. The background worker in
+app/ui/main_window.py uses it.
+"""
 
 import logging
 import sys
@@ -12,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class Camera:
+    """Opens the webcam and reads frames. It can be opened again after an error."""
     def __init__(self, config: CameraSettings):
         self._config = config
         self._capture: cv2.VideoCapture | None = None

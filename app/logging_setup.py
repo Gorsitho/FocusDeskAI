@@ -1,14 +1,23 @@
-"""Technical application log, independent of any console.
+"""
+This file sets up the technical log of FocusDesk AI.
+Its main job is to save messages, warnings and errors to a file, even when
+there is no console window.
 
-A PyInstaller build with ``console=False`` has ``sys.stdout``/``sys.stderr`` set to
-None and no valid native stderr. Libraries that print (Ultralytics, tqdm download
-progress) then fail, which silently disabled phone detection. This module
+Why this is needed: in the .exe built with PyInstaller (``console=False``),
+``sys.stdout`` and ``sys.stderr`` are None. Some libraries (Ultralytics, tqdm)
+print text, and without a place to print they fail. In the past this silently
+turned off phone detection.
 
-* writes a rotating log file to %LOCALAPPDATA%\\FocusDeskAI\\FocusDeskAI.log,
-* replaces missing Python streams with ones that forward to that log,
-* logs uncaught exceptions (main thread, Python threads) with tracebacks,
-* sends native crashes (faulthandler) and native stderr output (MediaPipe's C++
-  logging) to FocusDeskAI_native.log next to it.
+This file:
+
+* writes a log file that rotates (older parts are kept as backups) to
+  %LOCALAPPDATA%\\FocusDeskAI\\FocusDeskAI.log,
+* replaces missing Python output streams with streams that write to this log,
+* logs errors that nobody caught (main thread and other threads) with the full traceback,
+* sends hard crashes and C/C++ library output (MediaPipe) to
+  FocusDeskAI_native.log in the same folder.
+
+It uses app/config/paths.py to find the log folder. app/main.py calls it first.
 """
 
 import faulthandler
@@ -158,6 +167,7 @@ def _setup_native_output(native_path: Path) -> None:
 
 
 def log_startup() -> None:
+    """Write basic facts about this run (process id, Python version, paths) to the log."""
     logger.info("=" * 72)
     logger.info("FocusDesk AI starting (pid %d)", os.getpid())
     logger.info("Python %s on %s", sys.version.split()[0], platform.platform())

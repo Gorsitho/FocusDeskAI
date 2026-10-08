@@ -1,4 +1,13 @@
-"""One plain-text log file per completed session: sessions/session_0000.log, ..."""
+"""
+This file saves one text log file for every finished work session:
+sessions/session_0000.log, session_0001.log, and so on.
+
+Each file shows the start and end time of the session and how long the user
+was in each state (FOCUSED, DISTRACTED, AWAY, BREAK). An existing file is never overwritten.
+
+It gets the session result (SessionSummary) from app/features/session.py.
+app/ui/main_window.py uses it when a session ends.
+"""
 
 import logging
 import re
@@ -30,6 +39,7 @@ def _timestamp(value) -> str:
 
 
 def format_session(summary: SessionSummary) -> str:
+    """Build the text of one session log file."""
     lines = [
         "FocusDesk AI - session log",
         "==========================",
@@ -49,6 +59,7 @@ def format_session(summary: SessionSummary) -> str:
 
 
 class SessionLogStore:
+    """Writes session log files into one folder and finds the next free session number."""
     def __init__(self, directory: Path):
         self.directory = Path(directory)
 

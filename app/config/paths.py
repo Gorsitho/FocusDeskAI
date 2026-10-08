@@ -1,7 +1,12 @@
-"""Writable per-user locations (logs, session logs, downloaded models).
+"""
+This file decides where FocusDesk AI saves its own files:
+log files, session logs and downloaded AI models.
 
-The install directory of a PyInstaller build may be read-only, so everything the
-app writes lives under %LOCALAPPDATA%\\FocusDeskAI (or a platform equivalent).
+The install folder of the .exe may be read-only, so everything the app writes
+goes to %LOCALAPPDATA%\\FocusDeskAI (or a similar folder on other systems).
+If that folder cannot be used, the temp folder is used instead.
+
+It is used by app/logging_setup.py, app/config/settings.py and app/ui/main_window.py.
 """
 
 import os
