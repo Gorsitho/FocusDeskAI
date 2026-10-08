@@ -144,12 +144,36 @@ class DetectionSettings:
     """Confidence limits for the detectors and how often YOLO runs."""
     min_face_confidence: float = 0.5
     min_pose_confidence: float = 0.5
+    # Person boxes.
     yolo_confidence: float = 0.4
+    # Weakest phone box YOLO reports. Weak boxes are often background objects, so they
+    # must also pass the zoomed verification below and the checks in PhoneTracker.
+    phone_confidence: float = 0.35
+    # COCO "remote": phones held in the hand are often labelled as one. Only used when held.
+    remote_confidence: float = 0.45
+    # Verification: every phone box below phone_verify_skip is cut out (with some context,
+    # enlarged to phone_verify_imgsz pixels) and YOLO must find a phone there again with at
+    # least phone_verify_confidence. Background objects rarely survive this. 0 turns it off.
+    phone_verify_imgsz: int = 320
+    phone_verify_confidence: float = 0.4
+    phone_verify_skip: float = 0.75
+    # Side of the verification crop relative to the box's longer side (at least 128 px).
+    phone_verify_context: float = 2.5
     # YOLO is the most expensive stage; running it every N frames keeps the
     # pipeline responsive while still catching a phone within a fraction of a second.
     yolo_every_n_frames: int = 5
+    # While a phone is (or was just) visible YOLO runs more often, to follow it closely.
+    yolo_every_n_frames_active: int = 2
+    # Second YOLO pass on crops around the hands (input size in pixels), which finds
+    # small phones in the hand that the full-frame pass misses. 0 turns it off.
+    hand_roi_imgsz: int = 320
+    # Side of a hand crop relative to the shoulder width (at least hand_roi_min_px).
+    hand_roi_scale: float = 1.1
+    hand_roi_min_px: int = 160
     # Minimum landmark visibility for a pose keypoint to be trusted.
     min_landmark_visibility: float = 0.5
+    # Hands are often half out of view; wrists/fingers need less visibility to be used.
+    min_hand_visibility: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -199,6 +223,79 @@ class FeatureSettings:
     phone_gaze_hold_s: float = 1.0
     # A phone stays "visible" this long after YOLO last saw it (YOLO misses frames).
     phone_hold_s: float = 2.5
+    # ... and this long while it is in the user's hand (the fingers often hide it).
+    phone_hold_in_hand_s: float = 4.0
+    # Phone evidence: every YOLO run adds the box confidence; runs without the phone
+    # multiply it by phone_miss_decay. A phone is confirmed by one very clear box
+    # (phone_instant_confidence), or by evidence of at least phone_confirm_evidence when at
+    # least one box was strong (phone_strong_confidence) or the phone is in the user's hand
+    # or at the face. Repeated weak boxes of a background object are never enough.
+    phone_confirm_evidence: float = 1.0
+    phone_instant_confidence: float = 0.75
+    phone_strong_confidence: float = 0.55
+    phone_miss_decay: float = 0.5
+    phone_max_evidence: float = 2.0
+    # Plausibility relative to the user's face (sizes in face heights, distance in face
+    # widths). A phone near the user appears at least phone_min_face_size large; smaller
+    # boxes are far behind the user. Boxes larger than phone_max_face_size (a screen, a
+    # picture frame), above the head, or further than phone_max_reach to the side are
+    # rejected unless a hand holds them. Boxes longer than phone_max_aspect : 1 are not phones.
+    phone_min_face_size: float = 0.3
+    phone_max_face_size: float = 2.5
+    phone_max_reach: float = 3.5
+    phone_max_aspect: float = 4.0
+    # Held in the hand: a wrist or finger point within this distance of the phone box,
+    # relative to the box's longer side.
+    phone_hand_max_distance: float = 0.6
+    # Held at the ear (a call): the box centre at face height, at most this many face
+    # widths beside the face, and at least phone_ear_min_size face heights large.
+    phone_ear_max_offset: float = 0.9
+    phone_ear_min_size: float = 0.35
+    # --- eyes ---------------------------------------------------------------------
+    # Converts the iris offset inside the eye (fraction of the eye width) into an
+    # eye rotation: sin(angle) = offset * gain. ~2.5 for a 30 mm eye and 12 mm eyeball.
+    eye_gaze_gain: float = 2.5
+    # How strongly the measured eye rotation changes the head-only direction (0 = ignore
+    # the eyes, 1 = full). The vertical iris position is less precise than the horizontal.
+    eye_yaw_weight: float = 1.0
+    eye_pitch_weight: float = 0.7
+    # The attention margin is meant for the uncertainty of a head-only direction (how much
+    # the eyes add is unknown). With the eyes measured on an axis, that axis uses this
+    # fraction of the margin, so a look away with the eyes is noticed.
+    eye_margin_scale: float = 0.5
+    # Time constant of the eye-gaze smoothing.
+    eye_smoothing_s: float = 0.15
+    # The two eyes must agree within this many degrees, or the eye gaze is not used.
+    eye_max_disagreement: float = 20.0
+    # Learned neutral iris position (like the pitch calibration): samples while the
+    # head points at a monitor; capped at eye_calibration_max_offset degrees.
+    eye_calibration_window_s: float = 120.0
+    eye_calibration_min_samples: int = 20
+    eye_calibration_sample_every_s: float = 0.25
+    eye_calibration_max_error: float = 15.0
+    eye_calibration_max_offset: float = 10.0
+    # Eye openness = eye aspect ratio / the user's normal open value. The normal value is
+    # learned (a high percentile over eye_baseline_window_s); this is the starting guess.
+    eye_open_ear: float = 0.28
+    eye_baseline_window_s: float = 60.0
+    eye_baseline_min_samples: int = 30
+    eye_baseline_percentile: float = 85.0
+    # Openness below these ratios is "closed" / "partially closed".
+    eye_closed_ratio: float = 0.5
+    eye_partial_ratio: float = 0.75
+    # Blink blendshape (0..1, when MediaPipe provides it): closed needs at least
+    # eye_blink_min; at eye_blink_closed or more the eye counts as closed with a
+    # partly-open eye aspect ratio too.
+    eye_blink_min: float = 0.35
+    eye_blink_closed: float = 0.75
+    # Looking down lowers the upper eyelids. Between eye_down_start and eye_down_full
+    # degrees of downward gaze the closed/partial thresholds shrink by up to eye_down_relax,
+    # so reading the lower screen, a keyboard or a notebook is not "eyes closing".
+    eye_down_start: float = 5.0
+    eye_down_full: float = 35.0
+    eye_down_relax: float = 0.45
+    # Eye closures shorter than this are blinks and do not interrupt anything.
+    eye_blink_grace_s: float = 0.3
     # Time constant of the exponential smoothing applied to yaw/pitch/roll.
     head_smoothing_s: float = 0.25
     # A behaviour timer survives interruptions shorter than this.
@@ -213,8 +310,9 @@ class FeatureSettings:
 
 @dataclass(frozen=True)
 class StateSettings:
-    # Nobody visible for this long -> AWAY.
     """Times used by the state rules: when the state becomes DISTRACTED or AWAY."""
+    # No *face* for this long -> AWAY, even if a body is still visible. A body without a
+    # face only bridges shorter face dropouts (head bowed over a phone or a notebook).
     away_after_s: float = 3.0
     # Someone "visible" but without any movement for this long -> AWAY (an empty
     # chair, a coat or a photo that the detectors mistake for a person).
@@ -223,6 +321,8 @@ class StateSettings:
     look_away_after_s: float = 1.0
     # Continuous time looking at a visible phone before DISTRACTED.
     phone_after_s: float = 1.0
+    # Continuous time with the eyes closed (not blinking) before DISTRACTED.
+    eyes_closed_after_s: float = 2.0
     # Mean normalised landmark displacement per second below which nothing moves.
     still_motion_threshold: float = 0.01
     # A candidate state must persist this long before it is displayed (prevents flicker).

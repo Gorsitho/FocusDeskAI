@@ -1,9 +1,10 @@
 """
-This file finds the user's body points (nose, ears, shoulders, hips) in a camera
+This file finds the user's body points (nose, ears, shoulders, hands, hips) in a camera
 frame with MediaPipe Pose Landmarker.
 
 The background worker in app/ui/main_window.py uses it. The points are used by
-app/features/pose_features.py and, to measure movement, by app/features/activity_features.py.
+app/features/pose_features.py, app/features/phone_features.py (a phone in the hand)
+and, to measure movement, by app/features/activity_features.py.
 """
 
 import logging
@@ -29,6 +30,10 @@ class PoseLandmark(IntEnum):
     RIGHT_EAR = 8
     LEFT_SHOULDER = 11
     RIGHT_SHOULDER = 12
+    LEFT_WRIST = 15
+    RIGHT_WRIST = 16
+    LEFT_INDEX = 19
+    RIGHT_INDEX = 20
     LEFT_HIP = 23
     RIGHT_HIP = 24
 

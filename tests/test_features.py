@@ -344,17 +344,25 @@ def test_far_side_monitor_keeps_focus_when_face_leaves_the_camera():
     person = ObjectResult(person_detected=True)
     _run(pipeline, 2.0, _face(yaw=yaw, pitch=pitch), person)
     no_face = FaceResult(False)
-    analysis = _run(pipeline, 12.0, no_face, person, start=2.0)
+    # The face is the presence requirement: the far monitor is only credited while the
+    # face has been gone for less than away_after_s ...
+    analysis = _run(pipeline, 4.5, no_face, person, start=2.0)
     assert analysis.features.monitor == 2
     assert analysis.state is FocusState.FOCUSED
+    # ... after that the user counts as away, even though the body is still visible.
+    analysis = _run(pipeline, 12.0, no_face, person, start=4.5)
+    assert analysis.state is FocusState.AWAY
+    assert analysis.reason.code is ReasonCode.FACE_MISSING
 
 
 def test_lost_face_on_a_near_monitor_still_counts_as_looking_away():
     pipeline = FeaturePipeline(CFG)
     person = ObjectResult(person_detected=True)
     _run(pipeline, 2.0, _face(), person)
-    analysis = _run(pipeline, 9.0, FaceResult(False), person, start=2.0)
+    analysis = _run(pipeline, 4.9, FaceResult(False), person, start=2.0)
     assert analysis.state is FocusState.DISTRACTED
+    analysis = _run(pipeline, 9.0, FaceResult(False), person, start=4.9)
+    assert analysis.state is FocusState.AWAY
 
 
 def test_workspace_change_applies_live():
@@ -419,10 +427,10 @@ def test_head_pose_smoother_restarts_after_face_loss():
 
 
 def test_phone_tracker_holds_briefly():
-    tracker = PhoneTracker(hold_s=1.0)
-    assert tracker.update(0.0, _phone_below()) is not None
-    assert tracker.update(0.5, ObjectResult()) is not None
-    assert tracker.update(1.6, ObjectResult()) is None
+    tracker = PhoneTracker(_features_cfg(phone_hold_s=1.0))
+    assert tracker.update(0.0, _phone_below().phone_candidates) is not None
+    assert tracker.update(0.5, []) is not None
+    assert tracker.update(1.6, []) is None
 
 
 # --- looking at the phone ----------------------------------------------------------
@@ -670,7 +678,7 @@ def test_face_lost_at_small_yaw_does_not_credit_far_monitor():
     pitch = pipeline.screen_zones.monitors[1].center[1]
     assert pipeline.screen_zones.monitors[1].core_yaw[0] < -20 < pipeline.screen_zones.monitors[1].core_yaw[1]
     _run(pipeline, 2.0, _face(yaw=-20, pitch=pitch, nose=(0.5, 0.5)), person)
-    analysis = _run(pipeline, 9.0, FaceResult(False), person, start=2.0)
+    analysis = _run(pipeline, 4.9, FaceResult(False), person, start=2.0)
     assert analysis.features.monitor is None
     assert analysis.state is FocusState.DISTRACTED
 
@@ -915,15 +923,19 @@ def test_tablet_looking_up_or_away_distracts(face):
 def test_tablet_face_lost_while_bent_over_the_desk_stays_focused():
     pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
     _run(pipeline, 3.0, _face(pitch=-40), PERSON)
-    analysis = _run(pipeline, 12.0, FaceResult(False), PERSON, start=3.0)
+    analysis = _run(pipeline, 5.5, FaceResult(False), PERSON, start=3.0)
     assert analysis.state is FocusState.FOCUSED
     assert analysis.features.attention is Attention.DESK
+    # Bent over for longer with the face hidden: no face, so away.
+    analysis = _run(pipeline, 12.0, FaceResult(False), PERSON, start=5.5)
+    assert analysis.state is FocusState.AWAY
 
 
 def test_face_lost_after_looking_away_is_not_credited_to_the_desk():
     pipeline = FeaturePipeline(_method_cfg(StudyMethod.TABLET))
     _run(pipeline, 3.0, _face(yaw=60), PERSON)
-    analysis = _run(pipeline, 10.0, FaceResult(False), PERSON, start=3.0)
+    analysis = _run(pipeline, 5.9, FaceResult(False), PERSON, start=3.0)
+    assert analysis.features.attention is not Attention.DESK
     assert analysis.state is FocusState.DISTRACTED
 
 
@@ -1040,4 +1052,400 @@ def test_brief_glance_away_does_not_distract():
     _run(pipeline, 3.0, _face(), PERSON)
     _run(pipeline, 3.5, _face(yaw=70), PERSON, start=3.0)
     analysis = _run(pipeline, 6.0, _face(), PERSON, start=3.5)
+    assert analysis.state is FocusState.FOCUSED
+
+
+# --- eyes -------------------------------------------------------------------------
+
+from app.features.eye_features import (  # noqa: E402
+    LEFT_EYE,
+    RIGHT_EYE,
+    EyeAnalyzer,
+    EyeState,
+    measure_eyes,
+)
+from app.features.gaze_features import combine_gaze  # noqa: E402
+from app.features.phone_features import phone_at_ear, phone_in_hand  # noqa: E402
+
+
+def _eyed_face(yaw=0.0, pitch=0.0, eye_yaw=0.0, eye_pitch=0.0, openness=1.0, center=(0.5, 0.5), size=0.35,
+               blink=None):
+    """A face like _real_face, with real eye geometry.
+
+    `openness` 1.0 gives an eye aspect ratio of 0.3; the iris sits where an eye turned
+    by eye_yaw / eye_pitch (HeadPose convention) would put it.
+    """
+    face = _real_face(yaw, pitch, center, size)
+    lm = face.landmarks
+    width, height = FRAME
+    cx, cy = center[0] * width, center[1] * height
+    face_h = size * height
+    eye_w = 0.18 * face_h
+    gap = 0.3 * openness * eye_w
+    gain = CFG.features.eye_gaze_gain
+
+    def put(index, x, y):
+        lm[index, 0], lm[index, 1] = x / width, y / height
+
+    # Raw (non-mirrored) image: the user's right eye is on the image left.
+    for eye, side in ((RIGHT_EYE, -1), (LEFT_EYE, 1)):
+        mx, my = cx + side * 0.18 * face_h, cy - 0.1 * face_h
+        put(eye.outer, mx + side * eye_w / 2, my)
+        put(eye.inner, mx - side * eye_w / 2, my)
+        for (upper, lower), dx in zip(eye.lids, (-eye_w / 6, eye_w / 6)):
+            put(upper, mx + dx, my - gap / 2)
+            put(lower, mx + dx, my + gap / 2)
+        put(eye.iris, mx + math.sin(math.radians(eye_yaw)) / gain * eye_w,
+            my - math.sin(math.radians(eye_pitch)) / gain * eye_w)
+    if blink is not None:
+        face.blendshapes = {"eyeBlinkLeft": blink, "eyeBlinkRight": blink}
+    return face
+
+
+def _monitor_face(**eyes):
+    """Head pointing at the centre of the default monitor."""
+    yaw, pitch = compute_screen_zones(CFG.features).monitors[0].center
+    return _eyed_face(yaw=yaw, pitch=pitch, **eyes)
+
+
+def test_eyes_measure_neutral_and_turned_gaze():
+    neutral = measure_eyes(_eyed_face().landmarks, FRAME, CFG.features)
+    assert neutral.yaw == pytest.approx(0.0, abs=0.5) and neutral.pitch == pytest.approx(0.0, abs=0.5)
+    assert neutral.aspect_ratio == pytest.approx(0.3, abs=0.01)
+    turned = measure_eyes(_eyed_face(eye_yaw=20, eye_pitch=-15).landmarks, FRAME, CFG.features)
+    assert turned.yaw == pytest.approx(20, abs=1.0)
+    assert turned.pitch == pytest.approx(-15, abs=1.0)
+
+
+def test_eyes_reject_implausible_landmarks():
+    assert measure_eyes(_face().landmarks, FRAME, CFG.features) is None  # all points on top of each other
+    assert measure_eyes(_real_face().landmarks, FRAME, CFG.features) is None  # random points
+    assert measure_eyes(np.zeros((468, 3), np.float32), FRAME, CFG.features) is None  # no iris points
+
+
+def _eye_state(openness, head=HeadPose(0, -7, 0), blink=None):
+    analyzer = EyeAnalyzer(CFG.features)
+    zones = compute_screen_zones(CFG.features)
+    m = measure_eyes(_eyed_face(openness=openness, blink=blink).landmarks, FRAME, CFG.features)
+    m.blink = blink
+    return analyzer.update(0.0, m, head, None, zones.monitors[0].center[1])
+
+
+@pytest.mark.parametrize("openness,state", [
+    (1.0, EyeState.OPEN), (0.55, EyeState.PARTIAL), (0.2, EyeState.CLOSED),
+])
+def test_eye_state_from_openness(openness, state):
+    assert _eye_state(openness).state is state
+
+
+def test_lowered_eyelids_while_looking_down_are_not_closed():
+    # The same eyelid gap is "closed" while looking at the screen, but not while looking
+    # down at a keyboard or notebook, where the lids drop naturally.
+    assert _eye_state(0.35).state is EyeState.CLOSED
+    assert _eye_state(0.35, head=HeadPose(0, -27, 0)).state in (EyeState.PARTIAL, EyeState.OPEN)
+
+
+def test_blink_score_confirms_a_closed_eye():
+    assert _eye_state(0.2, blink=0.9).state is EyeState.CLOSED
+    # A narrow eye that MediaPipe does not see blinking (e.g. squinting) is not closed.
+    assert _eye_state(0.2, blink=0.1).state is EyeState.PARTIAL
+
+
+def test_eye_baseline_adapts_to_naturally_narrow_eyes():
+    analyzer = EyeAnalyzer(CFG.features)
+    narrow = measure_eyes(_eyed_face(openness=0.55).landmarks, FRAME, CFG.features)
+    states = [analyzer.update(t, narrow, HeadPose(0, -7, 0), (0.0, -7.2), -7.2).state
+              for t in np.arange(0.0, 10.0, 0.1)]
+    assert states[0] is EyeState.PARTIAL
+    assert states[-1] is EyeState.OPEN  # this user's normal open eye
+
+
+def test_combine_gaze_adds_the_eyes_to_the_head():
+    cfg = CFG.features
+    head = HeadPose(10, -5, 2)
+    assert combine_gaze(head, None, None, cfg) == head
+    # Eyes doing exactly what the head-ratio model assumes: the head angle again.
+    expected_eye_yaw = head.yaw * (1 / cfg.head_yaw_ratio - 1)
+    assert combine_gaze(head, expected_eye_yaw, None, cfg).yaw == pytest.approx(head.yaw)
+    assert combine_gaze(head, 30, None, cfg).yaw > head.yaw + 10
+    assert combine_gaze(head, -30, None, cfg).yaw < head.yaw
+    assert combine_gaze(head, None, -30, cfg).pitch < head.pitch
+
+
+def test_eyes_closed_for_long_becomes_distracted():
+    pipeline = FeaturePipeline(CFG)
+    _run(pipeline, 2.0, _monitor_face(), PERSON)
+    analysis = _run(pipeline, 6.0, _monitor_face(openness=0.1), PERSON, start=2.0)
+    assert analysis.features.eyes.state is EyeState.CLOSED
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.code is ReasonCode.EYES_CLOSED
+
+
+def test_blinking_does_not_distract():
+    pipeline = FeaturePipeline(CFG)
+    open_eyes, closed_eyes = _monitor_face(), _monitor_face(openness=0.1)
+    analysis = None
+    for t in np.arange(0.0, 20.0, 0.05):
+        blinking = (t % 3.0) < 0.2
+        analysis = pipeline.process(float(t), FRAME, closed_eyes if blinking else open_eyes,
+                                    PoseResult(False), PERSON)
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_partially_closed_eyes_on_the_screen_stay_focused():
+    pipeline = FeaturePipeline(CFG)
+    analysis = _run(pipeline, 30.0, _monitor_face(openness=0.6), PERSON)
+    assert analysis.features.eyes.state in (EyeState.PARTIAL, EyeState.OPEN)
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_eyes_closed_does_not_count_as_looking_away():
+    pipeline = FeaturePipeline(CFG)
+    analysis = _run(pipeline, 1.5, _monitor_face(openness=0.1), PERSON)
+    assert analysis.features.activity.seconds_looking_away == 0.0
+
+
+def test_looking_away_with_the_eyes_alone_distracts():
+    pipeline = FeaturePipeline(CFG)
+    _run(pipeline, 2.0, _monitor_face(), PERSON)
+    analysis = _run(pipeline, 6.0, _monitor_face(eye_yaw=40), PERSON, start=2.0)
+    assert analysis.features.attention is Attention.LEFT
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.code is ReasonCode.LOOKING_AWAY
+
+
+def test_small_eye_movements_on_the_screen_stay_focused():
+    pipeline = FeaturePipeline(CFG)
+    analysis = None
+    for t in np.arange(0.0, 20.0, 0.1):
+        # Reading: the eyes sweep across the screen.
+        analysis = pipeline.process(float(t), FRAME, _monitor_face(eye_yaw=15 * math.sin(t)), PoseResult(False),
+                                    PERSON)
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_eyes_turned_back_to_the_screen_keep_focus_despite_a_turned_head():
+    head_yaw = 38.0  # beyond the head-only tolerance of the single monitor
+    without_eyes = _run(FeaturePipeline(CFG), 6.0, _real_face(yaw=head_yaw, center=(0.5, 0.5)), PERSON)
+    assert without_eyes.state is FocusState.DISTRACTED
+    with_eyes = _run(FeaturePipeline(CFG), 6.0, _eyed_face(yaw=head_yaw, pitch=-7, eye_yaw=-30), PERSON)
+    assert with_eyes.features.attention is Attention.ON_SCREEN
+    assert with_eyes.state is FocusState.FOCUSED
+
+
+def test_tablet_reading_with_the_eyes_down_counts_as_the_desk():
+    cfg = dataclasses.replace(CFG, features=_features_cfg(study_method=StudyMethod.TABLET))
+    analysis = _run(FeaturePipeline(cfg), 6.0, _eyed_face(pitch=-2, eye_pitch=-30, openness=0.6), PERSON)
+    assert analysis.features.attention is Attention.DESK
+    assert analysis.state is FocusState.FOCUSED
+
+
+# --- phone: evidence, hands, ear --------------------------------------------------------
+
+def _weak_phone(box=(290, 400, 350, 470), conf=0.3, label="cell phone"):
+    return ObjectResult(phone_detected=label == "cell phone", person_detected=True,
+                        detections=[Detection(label, conf, box)])
+
+
+def test_single_weak_phone_box_is_not_trusted():
+    tracker = PhoneTracker(CFG.features)
+    assert tracker.update(0.0, _weak_phone().phone_candidates) is None
+    assert tracker.update(0.2, []) is None
+
+
+def test_repeated_weak_boxes_of_a_background_object_are_never_trusted():
+    tracker = PhoneTracker(CFG.features)
+    for t in np.arange(0.0, 10.0, 0.2):
+        assert tracker.update(float(t), _weak_phone(conf=0.45).phone_candidates) is None
+
+
+def test_repeated_boxes_with_one_strong_confirm_a_phone():
+    tracker = PhoneTracker(CFG.features)
+    assert tracker.update(0.0, _weak_phone(conf=0.6).phone_candidates) is None  # one box is not enough
+    assert tracker.update(0.2, _weak_phone(conf=0.45).phone_candidates) is not None
+
+
+def test_repeated_weak_boxes_in_the_hand_confirm_a_phone():
+    tracker = PhoneTracker(CFG.features)
+    for t in (0.0, 0.2):
+        tracker.update(t, _weak_phone(conf=0.4).phone_candidates, supported=lambda d: True)
+    assert tracker.update(0.4, _weak_phone(conf=0.4).phone_candidates, supported=lambda d: True) is not None
+
+
+def test_a_repeated_yolo_result_adds_no_evidence():
+    tracker = PhoneTracker(CFG.features)
+    weak = _weak_phone().phone_candidates
+    tracker.update(0.0, weak, fresh=True)
+    assert tracker.update(0.1, weak, fresh=False) is None
+
+
+def test_confirmed_phone_survives_longer_in_the_hand():
+    tracker = PhoneTracker(CFG.features)
+    tracker.update(0.0, _phone_below().phone_candidates)
+    tracker.in_hand = True
+    assert tracker.update(3.5, []) is not None  # beyond phone_hold_s, within phone_hold_in_hand_s
+    assert tracker.update(4.5, []) is None
+
+
+def _hands_pose(*hands):
+    """Upright pose with the wrists (and index fingers) at the given pixel positions."""
+    pose = _pose(nose=(0.5, 0.4), left_shoulder=(0.65, 0.75), right_shoulder=(0.35, 0.75))
+    for (x, y), wrist, index in zip(hands, (PoseLandmark.LEFT_WRIST, PoseLandmark.RIGHT_WRIST),
+                                    (PoseLandmark.LEFT_INDEX, PoseLandmark.RIGHT_INDEX)):
+        pose.landmarks[wrist, :2] = (x / FRAME[0], y / FRAME[1])
+        pose.landmarks[index, :2] = (x / FRAME[0], (y - 15) / FRAME[1])
+    for i in (PoseLandmark.LEFT_WRIST, PoseLandmark.RIGHT_WRIST, PoseLandmark.LEFT_INDEX, PoseLandmark.RIGHT_INDEX):
+        if not np.any(pose.landmarks[i, :2]):
+            pose.landmarks[i, 3] = 0.0
+    return pose
+
+
+def test_phone_in_hand_and_at_ear_geometry():
+    hands = [(330.0, 460.0)]
+    assert phone_in_hand((290, 400, 350, 470), hands, CFG.features)
+    assert not phone_in_hand((500, 100, 540, 160), hands, CFG.features)
+    face = _real_face(center=(0.5, 0.45)).landmarks
+    assert phone_at_ear((150, 150, 230, 300), face, FRAME, CFG.features)  # beside the face, at its height
+    assert not phone_at_ear((290, 400, 350, 470), face, FRAME, CFG.features)  # below the face
+    assert not phone_at_ear((200, 200, 215, 215), face, FRAME, CFG.features)  # too small: far away
+
+
+def test_glancing_down_at_a_phone_with_the_eyes_is_phone_use():
+    # The head stays on the monitor; only the eyes go down to the phone in the hand.
+    phone = _phone_at((290, 400, 350, 470))
+    pose = _hands_pose((320, 460))
+    head_only = FeaturePipeline(CFG)
+    with_eyes = FeaturePipeline(CFG)
+    a = b = None
+    for t in np.arange(0.0, 5.0, 0.1):
+        a = head_only.process(float(t), FRAME, _real_face(*compute_screen_zones(CFG.features).monitors[0].center,
+                                                            center=(0.5, 0.5)), pose, phone)
+        b = with_eyes.process(float(t), FRAME, _monitor_face(eye_pitch=-35), pose, phone)
+    assert not a.features.phone.looking_at_phone and a.state is FocusState.FOCUSED
+    assert b.features.phone.in_hand
+    assert b.features.phone.looking_at_phone
+    assert b.state is FocusState.DISTRACTED and b.reason.code is ReasonCode.PHONE
+
+
+def test_phone_call_at_the_ear_is_phone_use_while_facing_the_screen():
+    pipeline = FeaturePipeline(CFG)
+    call = _phone_at((150, 150, 230, 300))
+    analysis = _run(pipeline, 5.0, _real_face(center=(0.5, 0.45)), call)
+    assert analysis.features.phone.at_ear
+    assert analysis.state is FocusState.DISTRACTED and analysis.reason.code is ReasonCode.PHONE
+
+
+def test_phone_in_hand_while_the_face_is_briefly_lost_is_phone_use():
+    pipeline = FeaturePipeline(CFG)
+    phone = _phone_at((290, 400, 350, 470))
+    pose = _hands_pose((320, 460))
+    head_down = _real_face(pitch=-45, center=(0.5, 0.35))
+    for t in np.arange(0.0, 2.0, 0.1):
+        pipeline.process(float(t), FRAME, head_down, pose, phone)
+    analysis = None
+    for t in np.arange(2.0, 4.5, 0.1):  # face lost over the phone, shorter than away_after_s
+        analysis = pipeline.process(float(t), FRAME, FaceResult(False), pose, phone)
+    assert analysis.features.phone.in_hand and analysis.features.phone.looking_at_phone
+    assert analysis.state is FocusState.DISTRACTED
+
+
+def test_remote_in_the_hand_counts_as_a_phone_but_not_on_the_desk():
+    pose = _hands_pose((320, 460))
+    pipeline = FeaturePipeline(CFG)
+    for t in (0.0, 0.2):  # two YOLO runs
+        analysis = pipeline.process(t, FRAME, FaceResult(False), pose, _weak_phone(conf=0.6, label="remote"))
+    assert analysis.features.phone.visible and analysis.features.phone.in_hand
+    pipeline = FeaturePipeline(CFG)
+    for t in (0.0, 0.2, 0.4):
+        on_desk = _weak_phone(box=(520, 420, 600, 460), conf=0.6, label="remote")
+        analysis = pipeline.process(t, FRAME, FaceResult(False), pose, on_desk)
+    assert not analysis.features.phone.visible
+
+
+# --- the face decides presence ------------------------------------------------------------
+
+from app.features.phone_features import plausible_phone  # noqa: E402
+
+_BODY = _pose(nose=(0.5, 0.4), left_shoulder=(0.65, 0.75), right_shoulder=(0.35, 0.75))
+
+
+def test_body_without_a_face_is_away():
+    pipeline = FeaturePipeline(CFG)
+    analysis = None
+    for t in np.arange(0.0, 6.0, 0.1):
+        analysis = pipeline.process(float(t), FRAME, FaceResult(False), _BODY, PERSON)
+    assert analysis.features.person_detected  # a body is visible ...
+    assert analysis.state is FocusState.AWAY  # ... but without a face that is away
+    assert analysis.reason.code is ReasonCode.FACE_MISSING
+
+
+def test_losing_the_face_becomes_away_and_returning_recovers_focus():
+    pipeline = FeaturePipeline(CFG)
+    face = _real_face(center=(0.5, 0.5))
+    for t in np.arange(0.0, 3.0, 0.1):
+        pipeline.process(float(t), FRAME, face, _BODY, PERSON)
+    analysis = None
+    for t in np.arange(3.0, 9.0, 0.1):
+        analysis = pipeline.process(float(t), FRAME, FaceResult(False), _BODY, PERSON)
+    assert analysis.state is FocusState.AWAY and analysis.reason.code is ReasonCode.FACE_MISSING
+    for t in np.arange(9.0, 12.0, 0.1):
+        analysis = pipeline.process(float(t), FRAME, face, _BODY, PERSON)
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_short_face_dropout_is_not_away():
+    pipeline = FeaturePipeline(CFG)
+    face = _real_face(center=(0.5, 0.5))
+    states = set()
+    for t in np.arange(0.0, 20.0, 0.1):
+        dropped = 5.0 <= t < 6.0  # one second without a face
+        analysis = pipeline.process(float(t), FRAME, FaceResult(False) if dropped else face, _BODY, PERSON)
+        states.add(analysis.state)
+    assert FocusState.AWAY not in states
+
+
+def test_nobody_at_all_is_still_reported_as_absent():
+    pipeline = FeaturePipeline(CFG)
+    nothing = (FaceResult(False), PoseResult(False), ObjectResult())
+    analysis = _run(pipeline, 1.0, _real_face(center=(0.5, 0.5)), PERSON)
+    for t in np.arange(1.0, 6.0, 0.1):
+        analysis = pipeline.process(float(t), FRAME, *nothing)
+    assert analysis.state is FocusState.AWAY and analysis.reason.code is ReasonCode.ABSENT
+
+
+# --- phone plausibility --------------------------------------------------------------------
+
+_USER_FACE = _real_face(center=(0.5, 0.45)).landmarks  # face ~168 px high, centred at (320, 216)
+
+
+@pytest.mark.parametrize("box,plausible", [
+    ((420, 380, 480, 450), True),  # on the desk in front of the user
+    ((290, 400, 350, 470), True),  # in the lap / below the face
+    ((560, 20, 600, 60), False),  # small and above the head: a shelf behind the user
+    ((40, 40, 70, 90), False),  # above the head at the side
+    ((500, 250, 520, 280), False),  # tiny: far behind the user
+    ((0, 0, 640, 480), False),  # the size of a screen
+    ((300, 300, 310, 400), False),  # 10:1, a pen or an edge
+])
+def test_phone_plausibility_relative_to_the_user(box, plausible):
+    det = Detection("cell phone", 0.6, box)
+    assert plausible_phone(det, _USER_FACE, FRAME, False, CFG.features) is plausible
+
+
+def test_held_phone_is_plausible_anywhere_but_unheld_needs_a_face():
+    small_above_head = Detection("cell phone", 0.6, (560, 20, 600, 60))
+    assert plausible_phone(small_above_head, _USER_FACE, FRAME, True, CFG.features)
+    on_desk = Detection("cell phone", 0.6, (420, 380, 480, 450))
+    assert not plausible_phone(on_desk, None, FRAME, False, CFG.features)
+
+
+def test_background_phone_like_object_never_becomes_a_phone():
+    # A confident-looking box on a shelf behind the user, every YOLO run for 30 s.
+    pipeline = FeaturePipeline(CFG)
+    face = _real_face(center=(0.5, 0.45))
+    analysis = None
+    for t in np.arange(0.0, 30.0, 0.2):
+        shelf = _weak_phone(box=(560, 20, 600, 60), conf=0.7)
+        analysis = pipeline.process(float(t), FRAME, face, PoseResult(False), shelf)
+        assert not analysis.features.phone.visible
     assert analysis.state is FocusState.FOCUSED

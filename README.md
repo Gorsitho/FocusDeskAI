@@ -2,29 +2,33 @@
 
 A desktop application that estimates a user's observable working state from their webcam.
 
-It reports **only observable visual signals** (presence, head orientation, posture, a visible phone).
+It reports **only observable visual signals** (presence, head and eye direction, eye opening, posture,
+a visible phone).
 It is not a psychological or medical assessment.
 
 ## What it shows
 
 | Signal | Source |
 | --- | --- |
-| Person present | MediaPipe Pose / Face, YOLO `person` |
-| Face present | MediaPipe Face Landmarker |
+| Present | **The face** (MediaPipe Face Landmarker); a body alone does not count |
+| Person visible | MediaPipe Pose / Face, YOLO `person` (shown, but not presence) |
 | Head yaw / pitch / roll | Facial transformation matrix from MediaPipe |
+| Eye direction | Iris position between the eye corners (MediaPipe iris landmarks) |
+| Eyes open / partly closed / closed | Eye aspect ratio vs. the user's learned open eye, MediaPipe blink score |
 | Posture (Upright / Leaning / Slouching) | Shoulder and nose landmarks from MediaPipe Pose |
-| Cell phone | Ultralytics YOLO (COCO class `cell phone`) |
-| Looking at the phone | Head direction compared with the phone's bounding box in the frame |
-| Monitor being looked at | Head pose vs. the configured 3D monitor layout |
+| Cell phone | Ultralytics YOLO (`cell phone`, and `remote` when held), full frame plus enlarged hand crops |
+| Phone in hand / at the ear | Phone box vs. wrist and finger landmarks (MediaPipe Pose) and the face |
+| Looking at the phone | Gaze (head + eyes) compared with the phone's bounding box in the frame |
+| Monitor being looked at | Gaze (head + eyes) vs. the configured 3D monitor layout |
 | State | Rule-based: `FOCUSED`, `DISTRACTED`, `AWAY`, plus a manual `BREAK` |
 
 ## Pipeline
 
 ```
-Webcam → OpenCV → MediaPipe (face, pose) → head pose (yaw/pitch/roll)
-Webcam → YOLO (cell phone, person)
+Webcam → OpenCV → MediaPipe (face + iris, pose) → head pose, eye state, eye direction
+Webcam → YOLO (cell phone, remote, person; extra pass on the hands)
           ↓
-   Feature extraction (pose, gaze, activity)
+   Feature extraction (pose, gaze = head + eyes, phone evidence, activity)
           ↓
    Rule-based focus state
           ↓
@@ -56,6 +60,44 @@ removes the user's vertical head-pose bias (shown under *Head → Pitch calibrat
 If a monitor lies so far to the side that the face leaves the camera's view, the app keeps
 crediting that monitor while the face is out of view after a large turn towards it.
 
+## Eyes
+
+The **eye direction** (iris position between the eye corners) is added to the head
+direction, so the gaze, not just the head, decides whether you look at a monitor. A glance
+away with the eyes alone counts, and a slightly turned head with the eyes on the screen
+stays focused. While the eyes are measured, the tolerance around the monitors on that axis
+is halved, because the remaining uncertainty is smaller. A slow calibration learns the
+neutral iris position while the head points at a monitor.
+
+The **eye state** is open, partly closed or closed. It compares the eyelid gap (corrected
+for the head angle) with *your* normal open eye, which is learned, and uses MediaPipe's
+blink score as a second opinion. Looking down lowers the eyelids naturally, so the limits
+are relaxed the further you look down (lower screen, keyboard, notebook). Partly closed eyes
+never count as a distraction on their own; closures shorter than a blink are ignored.
+
+## Phone detection
+
+Only objects that are very likely a phone count; background objects are filtered out in
+several steps:
+
+- **Zoomed verification:** every phone box below 0.75 confidence is cut out with some
+  context, enlarged and checked by YOLO again. Background objects rarely pass this.
+- **Plausibility:** relative to your face, a phone must be large enough to be near you
+  (not far behind you), smaller than a screen, not above your head, within reach to the
+  side, and not pen-shaped. A phone in your hand passes these checks anywhere; without a
+  visible face only a held phone counts.
+- **Confirmation:** one very clear box (0.75 or more) is enough. Otherwise several YOLO
+  runs must agree **and** at least one box must be strong (0.55 or more) or the phone must
+  be in your hand. Repeated weak boxes of a background object are never enough.
+- A second YOLO pass looks at enlarged crops around your hands, where small phones are.
+- Phones in the hand are often labelled `remote` by YOLO; a remote counts when it is held
+  or at your face, never when it lies on the desk.
+- A phone in your hand is kept for 4 s when YOLO loses it (fingers hide it), and YOLO runs
+  more often while a phone is around.
+- A phone counts as **in use** when your gaze (head and eyes) points at it, when it is held
+  up in front of your face, when it is held at your ear (a call), or when it is in your hand
+  while your face is briefly not visible.
+
 Everything is editable later under **⚙ Settings** and saved to
 `%APPDATA%\FocusDeskAI\user_settings.json` (older settings files are migrated).
 
@@ -68,17 +110,21 @@ needs a behaviour to last, head angles are smoothed, short interruptions (< 1 s)
 behaviour timer instead of resetting it, and a new state is shown only after it has
 persisted for 1 s.
 
-1. **AWAY** – nobody detected for 3 s, or no movement at all for the
+1. **AWAY** – **no face** for 3 s, even if a body or another person is still visible
+   (reason *Face not visible*; *Nobody in front of the camera* when nothing is visible).
+   Shorter face dropouts (head bowed over a phone or a notebook, a quick turn) are bridged
+   by the body as before. Also AWAY: no movement at all for the
    *No movement before away* time (default 30 s; catches an empty chair or a coat that the
    detectors mistake for a person).
-2. **DISTRACTED (phone)** – a phone is visible **and** the head points towards the phone's
-   bounding box, for the phone duration (default 1 s). A phone on the desk while you look at
-   a monitor stays `FOCUSED`; a phone held up close to your face in your line of sight counts
-   even when a monitor is behind it.
-3. **DISTRACTED** – looking outside every monitor (left/right/up/down/between monitors,
+2. **DISTRACTED (phone)** – a phone is in use (see *Phone detection*), for the phone
+   duration (default 1 s). A phone on the desk while you look at a monitor stays `FOCUSED`;
+   a phone held up close to your face in your line of sight counts even when a monitor is
+   behind it, and so does a call.
+3. **DISTRACTED (eyes closed)** – eyes closed (not blinking) for 2 s.
+4. **DISTRACTED** – the gaze is outside every monitor (left/right/up/down/between monitors,
    strong head roll), or the face is hidden while the body is visible, for the distraction
    duration (default 1 s).
-4. **FOCUSED** – otherwise.
+5. **FOCUSED** – otherwise.
 
 **BREAK** is set with the ☕ Break button and pauses distraction detection until you resume.
 

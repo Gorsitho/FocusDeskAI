@@ -1,6 +1,7 @@
 """
 This file finds the user's face in a camera frame with MediaPipe Face Landmarker.
-It returns 478 face points and a 3D transform of the head.
+It returns 478 face points (468 face + 10 iris points), a 3D transform of the
+head and the face "blendshapes" (scores such as eyeBlinkLeft, used for the eyes).
 
 app/vision/head_pose.py turns the transform into head angles. The background
 worker in app/ui/main_window.py uses this detector.
@@ -28,6 +29,8 @@ class FaceResult:
     landmarks: np.ndarray | None = None
     # 4x4 transform from MediaPipe's canonical face model to camera space.
     transform: np.ndarray | None = None
+    # Blendshape name -> score in [0, 1] (e.g. "eyeBlinkLeft"), when available.
+    blendshapes: dict[str, float] | None = None
 
 
 class FaceDetector:
@@ -41,6 +44,7 @@ class FaceDetector:
             min_face_detection_confidence=detection.min_face_confidence,
             min_face_presence_confidence=detection.min_face_confidence,
             output_facial_transformation_matrixes=True,
+            output_face_blendshapes=True,
         )
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
         logger.info("Face landmarker ready (%s)", model_path)
@@ -56,7 +60,10 @@ class FaceDetector:
         transform = None
         if result.facial_transformation_matrixes:
             transform = np.asarray(result.facial_transformation_matrixes[0], dtype=np.float64)
-        return FaceResult(detected=True, landmarks=landmarks, transform=transform)
+        blendshapes = None
+        if result.face_blendshapes:
+            blendshapes = {c.category_name: float(c.score) for c in result.face_blendshapes[0]}
+        return FaceResult(detected=True, landmarks=landmarks, transform=transform, blendshapes=blendshapes)
 
     def close(self) -> None:
         self._landmarker.close()

@@ -48,7 +48,7 @@ from app.ui.settings_dialog import SettingsDialog
 from app.ui.sound import DistractionSound
 from app.vision.camera import Camera
 from app.vision.face_detection import FaceDetector, FaceResult
-from app.vision.object_detection import ObjectDetector, ObjectResult
+from app.vision.object_detection import ObjectDetector, ObjectResult, hand_regions
 from app.vision.pose_detection import PoseDetector, PoseResult
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,8 @@ class AnalysisWorker(QThread):
         camera = Camera(cfg.camera)
         objects = ObjectResult()
         frame_index = 0
+        frames_since_yolo = cfg.detection.yolo_every_n_frames
+        phone_recent = False
         last_ts_ms = -1
         clock_start = time.monotonic()
         yolo_loader = threading.Thread(target=self._load_object_detector, name="YoloLoader", daemon=True)
@@ -148,13 +150,20 @@ class AnalysisWorker(QThread):
                 ts_ms = max(int(now * 1000), last_ts_ms + 1)
                 last_ts_ms = ts_ms
 
-                # 3. Run the detectors. YOLO is slow, so it only runs on every n-th frame;
-                #    the frames in between reuse its last result.
+                # 3. Run the detectors. YOLO is slow, so it only runs on every n-th frame
+                #    (more often while a phone is around); the frames in between reuse its
+                #    last result. It also looks closer at the hands, where a phone in use is.
                 face = face_detector.detect(frame, ts_ms) if face_detector else FaceResult(detected=False)
                 pose = pose_detector.detect(frame, ts_ms) if pose_detector else PoseResult(detected=False)
+                height, width = frame.shape[:2]
                 object_detector = self._object_detector
-                if object_detector and frame_index % cfg.detection.yolo_every_n_frames == 0:
-                    objects = self._detect_objects(object_detector, frame, objects)
+                interval = (cfg.detection.yolo_every_n_frames_active if phone_recent
+                            else cfg.detection.yolo_every_n_frames)
+                if object_detector and frames_since_yolo >= interval:
+                    rois = hand_regions(pose.landmarks if pose.detected else None, (width, height), cfg.detection)
+                    objects = self._detect_objects(object_detector, frame, objects, rois)
+                    frames_since_yolo = 0
+                frames_since_yolo += 1
                 frame_index += 1
                 if frame_index == 1:
                     # Importing torch for YOLO can take many seconds and holds the DLL loader
@@ -168,8 +177,8 @@ class AnalysisWorker(QThread):
                     logger.info("Detection settings applied")
 
                 # 5. Turn the detections into features and a focus state.
-                height, width = frame.shape[:2]
                 analysis = pipeline.process(now, (width, height), face, pose, objects)
+                phone_recent = analysis.features.phone.visible or bool(objects.phone_candidates)
                 self._log_changes(analysis)
 
                 # 6. Send the image and the result to the window (Qt signals are thread-safe).
@@ -183,9 +192,9 @@ class AnalysisWorker(QThread):
                 if detector is not None:
                     detector.close()
 
-    def _detect_objects(self, detector: ObjectDetector, frame, previous: ObjectResult) -> ObjectResult:
+    def _detect_objects(self, detector: ObjectDetector, frame, previous: ObjectResult, rois) -> ObjectResult:
         try:
-            return detector.detect(frame)
+            return detector.detect(frame, rois)
         except Exception:  # noqa: BLE001 - lose phone detection, keep the rest running
             logger.exception("YOLO inference failed; phone detection disabled")
             self._object_detector = None
@@ -197,18 +206,19 @@ class AnalysisWorker(QThread):
     def _log_changes(self, analysis: FrameAnalysis) -> None:
         """Log behaviour changes (not frames) for diagnostics."""
         f = analysis.features
-        snapshot = (analysis.state, f.phone.visible, f.phone.looking_at_phone, f.face_detected, f.person_detected)
+        snapshot = (analysis.state, f.phone.visible, f.phone.looking_at_phone, f.phone.in_hand, f.phone.at_ear,
+                    f.face_detected, f.person_detected)
         if snapshot == self._last_logged:
             return
         previous, self._last_logged = self._last_logged, snapshot
         if previous is None or previous[0] is not analysis.state:
             reason = analysis.reason.code.value if analysis.reason else "-"
             logger.info("State %s (%s)", analysis.state.value, reason)
-        if previous is None or previous[1:3] != snapshot[1:3]:
-            logger.info("Phone visible=%s, looking at phone=%s, nose-to-phone angle=%s",
-                        f.phone.visible, f.phone.looking_at_phone,
-                        "-" if f.phone.gaze_angle is None else f"{f.phone.gaze_angle:.0f} deg")
-        if previous is None or previous[3:] != snapshot[3:]:
+        if previous is None or previous[1:5] != snapshot[1:5]:
+            logger.info("Phone visible=%s (conf %.2f), in use=%s, in hand=%s, at ear=%s, gaze-to-phone angle=%s",
+                        f.phone.visible, f.phone.confidence, f.phone.looking_at_phone, f.phone.in_hand,
+                        f.phone.at_ear, "-" if f.phone.gaze_angle is None else f"{f.phone.gaze_angle:.0f} deg")
+        if previous is None or previous[5:] != snapshot[5:]:
             logger.debug("Face detected=%s, person detected=%s", f.face_detected, f.person_detected)
 
     def _create(self, detector_cls, name: str):

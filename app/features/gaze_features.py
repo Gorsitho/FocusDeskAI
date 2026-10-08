@@ -1,6 +1,6 @@
 """
 This file decides where the user is looking: at a monitor, at the desk, or somewhere else.
-It uses the head direction (yaw, pitch, roll) and the 3D desk layout.
+It uses the head direction (yaw, pitch, roll), the eye direction and the 3D desk layout.
 
 How it works:
 
@@ -9,7 +9,9 @@ How it works:
 * compute_screen_zones() turns each monitor into the range of head angles that
   are needed to look at it (a "monitor zone"). Angles are measured from the
   camera, like MediaPipe's head pose: looking straight into the camera is yaw = pitch = 0.
-* extract_gaze_features() compares the current head angles with these zones.
+* combine_gaze() adds the eye direction (app/features/eye_features.py) to the head
+  direction, so a look with the eyes alone moves the gaze too.
+* extract_gaze_features() compares the resulting angles with these zones.
   It also follows the study method: for Tablet / Notebook and Mixed, looking
   down counts as looking at the desk.
 * HeadPoseSmoother makes the head angles calmer (less jitter), and
@@ -59,21 +61,40 @@ class MonitorZone:
     def center(self) -> tuple[float, float]:
         return (sum(self.core_yaw) / 2.0, sum(self.core_pitch) / 2.0)
 
-    def contains(self, yaw: float, pitch: float, margin: float) -> bool:
+    def contains(self, yaw: float, pitch: float, margin: float, pitch_margin: float | None = None) -> bool:
+        pitch_margin = margin if pitch_margin is None else pitch_margin
         return (self.core_yaw[0] - margin <= yaw <= self.core_yaw[1] + margin
-                and self.core_pitch[0] - margin <= pitch <= self.core_pitch[1] + margin)
+                and self.core_pitch[0] - pitch_margin <= pitch <= self.core_pitch[1] + pitch_margin)
 
 
 @dataclass(frozen=True)
 class ScreenZones:
-    """The zones of all monitors, plus the tolerance (margin) around each of them."""
+    """The zones of all monitors, plus the tolerance (margin) around each of them.
+
+    `margin` applies to yaw and, unless `pitch_margin` is given, to pitch too.
+    """
     monitors: tuple[MonitorZone, ...]
     margin: float
+    pitch_margin: float | None = None
+
+    @property
+    def vertical_margin(self) -> float:
+        return self.margin if self.pitch_margin is None else self.pitch_margin
+
+    def scaled(self, yaw_scale: float, pitch_scale: float) -> "ScreenZones":
+        """The same zones with narrower (or wider) margins."""
+        return ScreenZones(self.monitors, self.margin * yaw_scale, self.vertical_margin * pitch_scale)
 
     def monitor_at(self, yaw: float, pitch: float, margin: float | None = None) -> int | None:
-        """Index of the monitor being looked at, preferring the closest centre on overlaps."""
-        margin = self.margin if margin is None else margin
-        hits = [z for z in self.monitors if z.contains(yaw, pitch, margin)]
+        """Index of the monitor being looked at, preferring the closest centre on overlaps.
+
+        An explicit `margin` applies to both axes.
+        """
+        if margin is None:
+            margin, pitch_margin = self.margin, self.vertical_margin
+        else:
+            pitch_margin = margin
+        hits = [z for z in self.monitors if z.contains(yaw, pitch, margin, pitch_margin)]
         if not hits:
             return None
         return min(hits, key=lambda z: math.hypot(yaw - z.center[0], pitch - z.center[1])).index
@@ -88,11 +109,11 @@ class ScreenZones:
 
     @property
     def pitch_min(self) -> float:
-        return min(z.core_pitch[0] for z in self.monitors) - self.margin
+        return min(z.core_pitch[0] for z in self.monitors) - self.vertical_margin
 
     @property
     def pitch_max(self) -> float:
-        return max(z.core_pitch[1] for z in self.monitors) + self.margin
+        return max(z.core_pitch[1] for z in self.monitors) + self.vertical_margin
 
 
 def _monitor_axes(monitor: MonitorPlacement) -> np.ndarray:
@@ -200,7 +221,12 @@ def extract_gaze_features(
         monitor = None if tilted else zones.monitor_at(head_pose.yaw, head_pose.pitch)
         if monitor is None and not tilted and previous_monitor is not None:
             zone = zones.monitors[previous_monitor]
-            if zone.contains(head_pose.yaw, head_pose.pitch, zones.margin + cfg.monitor_exit_margin):
+            # Narrowed zones (measured eyes, see ScreenZones.scaled) narrow the hysteresis too.
+            base = max(cfg.attention_margin, 1e-6)
+            exit_yaw = cfg.monitor_exit_margin * zones.margin / base
+            exit_pitch = cfg.monitor_exit_margin * zones.vertical_margin / base
+            if zone.contains(head_pose.yaw, head_pose.pitch, zones.margin + exit_yaw,
+                             zones.vertical_margin + exit_pitch):
                 monitor = previous_monitor
         turned_left = head_pose.yaw > zones.yaw_max
         turned_right = head_pose.yaw < zones.yaw_min
@@ -236,6 +262,28 @@ def extract_gaze_features(
         head_tilted=tilted,
         on_desk=on_desk,
         direction=direction,
+    )
+
+
+def combine_gaze(head: HeadPose, eye_yaw: float | None, eye_pitch: float | None, cfg: FeatureSettings) -> HeadPose:
+    """Head direction corrected by the measured eye direction, in head-angle units.
+
+    The monitor zones expect the head to do only part of a gaze shift
+    (head_yaw_ratio / head_pitch_ratio) and assume the eyes do the rest. With the
+    eyes measured, the real gaze is head + eyes, and its "head-equivalent" is
+    ratio * (head + eyes). When the eyes do exactly what the model assumes, this is
+    the head angle again; when they look elsewhere (a sideways glance, a look down
+    at a phone) the direction moves accordingly. A missing eye axis keeps the head angle.
+    """
+    def fuse(angle: float, eye: float | None, ratio: float, weight: float) -> float:
+        if eye is None:
+            return angle
+        return angle + weight * (ratio * (angle + eye) - angle)
+
+    return HeadPose(
+        yaw=fuse(head.yaw, eye_yaw, cfg.head_yaw_ratio, cfg.eye_yaw_weight),
+        pitch=fuse(head.pitch, eye_pitch, cfg.head_pitch_ratio, cfg.eye_pitch_weight),
+        roll=head.roll,
     )
 
 

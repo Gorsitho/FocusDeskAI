@@ -10,6 +10,7 @@ current language (app/ui/i18n.py). It is used by app/ui/main_window.py.
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
 
+from app.features.eye_features import EyeState
 from app.features.feature_pipeline import FocusState, FrameAnalysis, Reason, ReasonCode
 from app.features.state_timers import format_duration
 from app.ui import styles
@@ -29,10 +30,14 @@ def describe_reason(reason: Reason | None) -> str:
     seconds = format_seconds(reason.seconds, 0)
     if reason.code is ReasonCode.ABSENT:
         return tr("reason.absent")
+    if reason.code is ReasonCode.FACE_MISSING:
+        return tr("reason.face_missing")
     if reason.code is ReasonCode.NO_MOVEMENT:
         return tr("reason.no_movement", seconds=seconds)
     if reason.code is ReasonCode.PHONE:
         return tr("reason.phone", seconds=seconds)
+    if reason.code is ReasonCode.EYES_CLOSED:
+        return tr("reason.eyes_closed", seconds=seconds)
     if reason.code is ReasonCode.ON_DESK:
         return tr("reason.on_desk")
     if reason.code is ReasonCode.LOOKING_AWAY:
@@ -96,6 +101,7 @@ class Dashboard(QWidget):
         self._away_time = self._add_row(grid, 2, "field.looking_away")
         self._phone_time = self._add_row(grid, 3, "field.looking_at_phone")
         self._still_time = self._add_row(grid, 4, "field.no_movement")
+        self._eyes_closed_time = self._add_row(grid, 5, "field.eyes_closed")
         behaviour_layout.addLayout(grid)
         root.addWidget(behaviour_card)
 
@@ -114,6 +120,8 @@ class Dashboard(QWidget):
         self._phone = self._add_row(grid, 1, "field.phone")
         self._face = self._add_row(grid, 2, "field.face")
         self._person = self._add_row(grid, 3, "field.person")
+        self._eyes = self._add_row(grid, 4, "field.eyes")
+        self._eye_gaze = self._add_row(grid, 5, "field.eye_gaze")
         signals_layout.addLayout(grid)
         root.addWidget(signals_card)
 
@@ -201,6 +209,7 @@ class Dashboard(QWidget):
         self._away_time.setText(_duration(activity.seconds_looking_away))
         self._phone_time.setText(_duration(activity.seconds_looking_at_phone))
         self._still_time.setText(_duration(activity.seconds_still))
+        self._eyes_closed_time.setText(_duration(activity.seconds_eyes_closed))
 
         head = features.head_pose
         for label, angle in ((self._yaw, head and head.yaw), (self._pitch, head and head.pitch),
@@ -211,21 +220,39 @@ class Dashboard(QWidget):
         self._posture.setText(tr(f"posture.{features.pose.posture.value}"))
         if self._phone_available:
             phone = features.phone
-            if phone.looking_at_phone:
+            if phone.at_ear:
+                self._set_flag(self._phone, False, tr("value.phone_on_call"))
+            elif phone.looking_at_phone:
                 self._set_flag(self._phone, False, tr("value.phone_looking"))
             elif phone.visible:
                 # A visible phone that is not being looked at is fine.
-                self._phone.setText(tr("value.phone_ignored"))
+                self._phone.setText(tr("value.phone_in_hand" if phone.in_hand else "value.phone_ignored"))
                 self._phone.setStyleSheet(f"color: {styles.WARNING};")
             else:
                 self._set_flag(self._phone, None, tr("value.not_detected"))
         for label, ok in ((self._face, features.face_detected), (self._person, features.person_detected)):
             self._set_flag(label, ok, tr("value.detected") if ok else tr("value.not_detected"))
 
+        eyes = features.eyes
+        if not features.face_detected:
+            self._set_flag(self._eyes, None, _NO_VALUE)
+        else:
+            good = {EyeState.OPEN: True, EyeState.CLOSED: False}.get(eyes.state)
+            text = tr(f"eyes.{eyes.state.value}")
+            if eyes.openness is not None:
+                text += f" ({eyes.openness:.0%})"
+            self._set_flag(self._eyes, good, text)
+        if eyes.yaw is None:
+            self._eye_gaze.setText(_NO_VALUE)
+        else:
+            pitch = "" if eyes.pitch is None else f" / {eyes.pitch:+.0f}°"
+            self._eye_gaze.setText(f"{eyes.yaw:+.0f}°{pitch}")
+
     def clear(self) -> None:
         self.show_state(None)
         for label in (self._yaw, self._pitch, self._roll, self._calibration, self._posture, self._face, self._person,
-                      self._attention, self._monitor, self._away_time, self._phone_time, self._still_time):
+                      self._attention, self._monitor, self._away_time, self._phone_time, self._still_time,
+                      self._eyes_closed_time, self._eyes, self._eye_gaze):
             label.setText(_NO_VALUE)
             label.setStyleSheet("")
         if self._phone_available:

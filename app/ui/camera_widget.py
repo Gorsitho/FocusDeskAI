@@ -1,7 +1,7 @@
 """
 This file shows the camera image in the main window.
-It can also draw the detection markers on the image: face points, body points,
-phone boxes and an arrow for the head direction.
+It can also draw the detection markers on the image: face points, irises, body
+points, phone boxes and an arrow for the gaze direction (head and eyes).
 
 It uses the detector results from app/vision/ and the FrameAnalysis from
 app/features/feature_pipeline.py. It is used by app/ui/main_window.py.
@@ -15,10 +15,11 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 
 from app.features.feature_pipeline import FrameAnalysis
 from app.features.gaze_features import Attention
+from app.features.eye_features import EyeState
 from app.features.phone_features import NOSE_TIP
 from app.ui.i18n import tr
 from app.vision.face_detection import FaceResult
-from app.vision.object_detection import ObjectResult
+from app.vision.object_detection import PHONE_LABEL, ObjectResult
 from app.vision.pose_detection import PoseLandmark, PoseResult
 
 _FACE_COLOR = (113, 204, 46)  # BGR
@@ -27,6 +28,8 @@ _PHONE_COLOR = (18, 156, 243)
 _PHONE_IN_USE_COLOR = (60, 76, 231)
 _ON_SCREEN_COLOR = (113, 204, 46)
 _OFF_SCREEN_COLOR = (18, 156, 243)
+_IRIS_COLOR = (241, 196, 15)
+_EYES_CLOSED_COLOR = (60, 76, 231)
 _KEY_POSE_POINTS = [p.value for p in PoseLandmark]
 
 
@@ -53,17 +56,24 @@ def draw_overlays(
             cv2.line(canvas, (int(ls[0] * width), int(ls[1] * height)),
                      (int(rs[0] * width), int(rs[1] * height)), _POSE_COLOR, 2)
 
+    if analysis is not None:
+        eyes = analysis.features.eyes
+        color = _EYES_CLOSED_COLOR if eyes.state is EyeState.CLOSED else _IRIS_COLOR
+        for x, y in eyes.irises:
+            cv2.circle(canvas, (int(x), int(y)), 3, color, -1)
+
     in_use = analysis is not None and analysis.features.phone.looking_at_phone
     phone_color = _PHONE_IN_USE_COLOR if in_use else _PHONE_COLOR
-    for det in objects.detections:
-        if det.label != "cell phone":
-            continue
+    for det in objects.phone_candidates:
         x1, y1, x2, y2 = det.box
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), phone_color, 2)
-        cv2.putText(canvas, f"phone {det.confidence:.2f}", (x1, max(y1 - 6, 12)),
+        # Remotes are only phone candidates; draw them thinner.
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), phone_color, 2 if det.label == PHONE_LABEL else 1)
+        name = "phone" if det.label == PHONE_LABEL else "phone?"
+        cv2.putText(canvas, f"{name} {det.confidence:.2f}", (x1, max(y1 - 6, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, phone_color, 1, cv2.LINE_AA)
 
-    head = analysis.features.head_pose if analysis is not None else None
+    # Gaze direction (head and eyes together; the head alone without measurable eyes).
+    head = (analysis.features.gaze_pose or analysis.features.head_pose) if analysis is not None else None
     if head is not None and face.landmarks is not None:
         # Head direction: yaw > 0 (user's left) is +x in the raw frame, pitch > 0 is up.
         nx, ny = face.landmarks[NOSE_TIP, :2]

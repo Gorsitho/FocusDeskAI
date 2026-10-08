@@ -513,3 +513,41 @@ def test_settings_opened_in_tablet_mode_starts_greyed_out(qapp):
     dialog = SettingsDialog(UserSettings(study_method=StudyMethod.TABLET))
     assert not dialog._workspace_box.isEnabled()
     assert dialog.workspace_editor.graphicsEffect() is not None
+
+
+# --- eyes and phone details on the dashboard ----------------------------------------------
+
+from app.features.eye_features import EyeFeatures, EyeState  # noqa: E402
+
+
+def test_every_eye_state_is_translated():
+    keys = set(i18n._STRINGS["en"])
+    for state in EyeState:
+        assert f"eyes.{state.value}" in keys
+
+
+def test_dashboard_shows_eyes_and_phone_details(qapp):
+    i18n.set_language("en")
+    dashboard = Dashboard()
+    features = FrameFeatures(
+        timestamp=0.0, person_detected=True, face_detected=True,
+        eyes=EyeFeatures(state=EyeState.PARTIAL, openness=0.6, yaw=12.0, pitch=None),
+        phone=PhoneFeatures(visible=True, in_hand=True),
+    )
+    dashboard.update_analysis(FrameAnalysis(features, FocusState.FOCUSED, Reason(ReasonCode.ON_MONITOR)))
+    assert dashboard._eyes.text() == "Partly closed (60%)"
+    assert dashboard._eye_gaze.text() == "+12°"
+    assert dashboard._phone.text() == "In hand, ignored"
+
+    call = FrameFeatures(timestamp=0.0, person_detected=True, face_detected=True,
+                         eyes=EyeFeatures(state=EyeState.CLOSED, openness=0.1),
+                         phone=PhoneFeatures(visible=True, looking_at_phone=True, at_ear=True))
+    dashboard.update_analysis(FrameAnalysis(call, FocusState.DISTRACTED, Reason(ReasonCode.EYES_CLOSED, 3.0)))
+    assert dashboard._phone.text() == "At the ear (call)"
+    assert dashboard._reason.text() == "Eyes closed for 3 s"
+    assert dashboard._eye_gaze.text() == "—"  # no eye direction while the eyes are closed
+
+
+def test_reason_for_a_body_without_a_face():
+    i18n.set_language("en")
+    assert describe_reason(Reason(ReasonCode.FACE_MISSING)) == "Face not visible"

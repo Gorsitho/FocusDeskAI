@@ -1,7 +1,8 @@
 """
 This file measures behaviour over time, not in a single frame.
 It answers questions like: How long has the user been looking away?
-How long at the phone? When was a person last seen? Is anything moving?
+How long at the phone? How long have the eyes been closed? When was the face last seen?
+Is anything moving?
 
 Main parts:
 
@@ -28,11 +29,15 @@ _UPPER_BODY = slice(0, 13)
 @dataclass
 class ActivityFeatures:
     """Durations and movement values for one frame (made by ActivityTracker)."""
+    # Time since the user was last present: since the face was last seen when the
+    # caller passes `face_present`, otherwise since anybody was seen.
     seconds_since_person_seen: float = 0.0
     # Time the person has been present but looking away from the monitors.
     seconds_looking_away: float = 0.0
     # Time the person has been looking at a visible phone.
     seconds_looking_at_phone: float = 0.0
+    # Time the eyes have been closed (blinks do not count).
+    seconds_eyes_closed: float = 0.0
     # Mean landmark speed over the history window, in normalised image units per second.
     motion_level: float | None = None
     # Continuous time motion_level has stayed below the stillness threshold.
@@ -76,6 +81,7 @@ class ActivityTracker:
         self._last_person_time: float | None = None
         self._look_away = BehaviorTimer(feature_cfg.behavior_grace_s)
         self._phone_gaze = BehaviorTimer(feature_cfg.behavior_grace_s)
+        self._eyes_closed = BehaviorTimer(feature_cfg.eye_blink_grace_s)
         self._still_since: float | None = None
         self._prev_points: np.ndarray | None = None
         self._prev_time: float | None = None
@@ -88,9 +94,15 @@ class ActivityTracker:
         facing_screen: bool | None,
         looking_at_phone: bool,
         tracking_points: np.ndarray | None,
+        eyes_closed: bool = False,
+        face_present: bool | None = None,
     ) -> ActivityFeatures:
-        """Update all timers with the newest frame and return the current values."""
-        if person_present:
+        """Update all timers with the newest frame and return the current values.
+
+        `face_present` (if given) decides presence for seconds_since_person_seen;
+        `person_present` still drives the other timers.
+        """
+        if person_present if face_present is None else face_present:
             self._last_person_time = timestamp
 
         looking_at_phone = person_present and looking_at_phone
@@ -99,6 +111,7 @@ class ActivityTracker:
         looking_away = person_present and facing_screen is not True and not looking_at_phone
         seconds_looking_away = self._look_away.update(timestamp, looking_away)
         seconds_looking_at_phone = self._phone_gaze.update(timestamp, looking_at_phone)
+        seconds_eyes_closed = self._eyes_closed.update(timestamp, person_present and eyes_closed)
 
         self._update_motion(timestamp, tracking_points)
         self._trim(timestamp)
@@ -116,6 +129,7 @@ class ActivityTracker:
             ),
             seconds_looking_away=seconds_looking_away,
             seconds_looking_at_phone=seconds_looking_at_phone,
+            seconds_eyes_closed=seconds_eyes_closed,
             motion_level=motion_level,
             seconds_still=0.0 if self._still_since is None else timestamp - self._still_since,
         )
