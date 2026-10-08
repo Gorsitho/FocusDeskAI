@@ -31,10 +31,10 @@ LANGUAGES = ("en", "es", "de")
 class UserSettings:
     study_method: StudyMethod = StudyMethod.COMPUTER
     workspace: Workspace = field(default_factory=Workspace)
-    distraction_after_s: float = 5.0
-    phone_distraction_after_s: float = 3.0
+    distraction_after_s: float = 1.0
+    phone_distraction_after_s: float = 1.0
     # Time without any detected movement before the user counts as AWAY.
-    no_movement_away_after_s: float = 60.0
+    no_movement_away_after_s: float = 30.0
     # 1 = tolerant (wide monitor zones), 10 = strict.
     sensitivity: int = 5
     sound_enabled: bool = True
@@ -206,8 +206,8 @@ def apply_user_settings(base: Settings, user: UserSettings) -> Settings:
         base.features,
         workspace=user.workspace,
         study_method=user.study_method,
-        # Sensitivity 1 -> 20.4 deg tolerance, 5 -> 14 deg, 10 -> 6 deg.
-        attention_margin=22.0 - 1.6 * s,
+        # Sensitivity 1 -> 22.4 deg tolerance, 5 -> 16 deg, 10 -> 8 deg.
+        attention_margin=24.0 - 1.6 * s,
         # Sensitivity 1 -> 37 deg, 5 -> 45 deg, 10 -> 55 deg.
         phone_gaze_max_angle=35.0 + 2.0 * s,
     )

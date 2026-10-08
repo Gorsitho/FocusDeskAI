@@ -182,6 +182,10 @@ QGroupBox QWidget {{
     background-color: transparent;
     font-weight: normal;
 }}
+QGroupBox:disabled {{
+    background-color: {BACKGROUND};
+    border-style: dashed;
+}}
 QComboBox, QDoubleSpinBox, QSpinBox {{
     background-color: {SURFACE_RAISED};
     border: 1px solid {BORDER_STRONG};

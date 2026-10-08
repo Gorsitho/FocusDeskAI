@@ -171,12 +171,12 @@ def _features(**activity):
     [
         ({}, FocusState.FOCUSED),
         ({"seconds_since_person_seen": 5.0}, FocusState.AWAY),
-        ({"seconds_looking_at_phone": 3.5}, FocusState.DISTRACTED),
-        ({"seconds_looking_at_phone": 2.0}, FocusState.FOCUSED),
-        ({"seconds_looking_away": 6.0}, FocusState.DISTRACTED),
-        ({"seconds_looking_away": 4.0}, FocusState.FOCUSED),
-        ({"seconds_still": 75.0}, FocusState.AWAY),
-        ({"seconds_still": 30.0}, FocusState.FOCUSED),
+        ({"seconds_looking_at_phone": 1.5}, FocusState.DISTRACTED),
+        ({"seconds_looking_at_phone": 0.5}, FocusState.FOCUSED),
+        ({"seconds_looking_away": 1.5}, FocusState.DISTRACTED),
+        ({"seconds_looking_away": 0.5}, FocusState.FOCUSED),
+        ({"seconds_still": 35.0}, FocusState.AWAY),
+        ({"seconds_still": 20.0}, FocusState.FOCUSED),
         ({"seconds_still": 75.0, "seconds_looking_at_phone": 10.0}, FocusState.AWAY),
         ({"seconds_since_person_seen": 5.0, "seconds_looking_at_phone": 10.0}, FocusState.AWAY),
     ],
@@ -471,11 +471,11 @@ def _run(pipeline, until, face, objects, start=0.0, step=0.1):
 def test_phone_distraction_requires_configured_duration():
     pipeline = FeaturePipeline(CFG)
     looking_down = _face(pitch=-40)
-    # Phone threshold 3 s + 1 s stabiliser: still focused after 2.5 s.
-    early = _run(pipeline, 2.5, looking_down, _phone_below())
+    # Phone threshold 1 s + 1 s stabiliser: still focused after 1.5 s.
+    early = _run(pipeline, 1.5, looking_down, _phone_below())
     assert early.features.phone.looking_at_phone
     assert early.state is FocusState.FOCUSED
-    late = _run(pipeline, 4.6, looking_down, _phone_below(), start=2.5)
+    late = _run(pipeline, 2.6, looking_down, _phone_below(), start=1.5)
     assert late.state is FocusState.DISTRACTED
     assert late.reason.code is ReasonCode.PHONE
 
@@ -484,8 +484,8 @@ def test_looking_down_without_phone_uses_general_distraction_time():
     pipeline = FeaturePipeline(CFG)
     looking_down = _face(pitch=-40)
     person = ObjectResult(person_detected=True)
-    assert _run(pipeline, 4.5, looking_down, person).state is FocusState.FOCUSED
-    late = _run(pipeline, 7.0, looking_down, person, start=4.5)
+    assert _run(pipeline, 1.5, looking_down, person).state is FocusState.FOCUSED
+    late = _run(pipeline, 3.0, looking_down, person, start=1.5)
     assert late.state is FocusState.DISTRACTED
     assert late.reason.code is ReasonCode.LOOKING_AWAY
     assert late.reason.attention is Attention.DOWN
@@ -587,7 +587,7 @@ def test_pipeline_phone_on_users_left_while_head_turned_there():
     # Same head turn, phone on the other side: not phone use (just looking away, still short).
     pipeline = FeaturePipeline(CFG)
     phone_right = _phone_at((20, 300, 80, 380))
-    analysis = _run(pipeline, 4.0, _face(yaw=45, pitch=-25), phone_right)
+    analysis = _run(pipeline, 1.5, _face(yaw=45, pitch=-25), phone_right)
     assert not analysis.features.phone.looking_at_phone
     assert analysis.state is FocusState.FOCUSED
 
@@ -877,7 +877,8 @@ def test_computer_looking_down_still_distracts():
     (HeadPose(-20, -45, 0), True, Attention.DESK),
     (HeadPose(0, 0, 0), False, Attention.UP),  # straight ahead: no monitor to look at
     (HeadPose(60, 0, 0), False, Attention.LEFT),
-    (HeadPose(-60, -30, 0), False, Attention.DOWN),  # down, but beside the desk
+    (HeadPose(-60, -30, 0), True, Attention.DESK),  # any downward direction
+    (HeadPose(0, -3, 0), True, Attention.DESK),  # no minimum downward angle
     (HeadPose(0, -30, 50), False, Attention.HEAD_TILTED),
 ])
 def test_tablet_gaze_counts_the_desk_only(head, on_desk, attention):
@@ -944,10 +945,15 @@ def test_mixed_gaze_counts_monitors_and_desk(head, attention, on_desk):
     assert gaze.on_desk is on_desk
 
 
-def test_mixed_desk_must_be_below_the_monitors():
-    cfg = _method_cfg(StudyMethod.MIXED).features
-    # Looking down but far beyond the monitors' horizontal span is not the desk.
-    assert not extract_gaze_features(HeadPose(70, -35, 0), cfg).on_desk
+@pytest.mark.parametrize("head", [HeadPose(70, -35, 0), HeadPose(-50, -10, 0), HeadPose(30, -60, 0)])
+def test_mixed_any_downward_direction_is_the_desk(head):
+    gaze = extract_gaze_features(head, _method_cfg(StudyMethod.MIXED).features)
+    assert gaze.on_desk and gaze.direction is Attention.DESK
+
+
+def test_computer_downward_off_the_monitors_is_not_the_desk():
+    gaze = extract_gaze_features(HeadPose(70, -35, 0), _method_cfg(StudyMethod.COMPUTER).features)
+    assert not gaze.on_desk and gaze.direction is not Attention.DESK
 
 
 @pytest.mark.parametrize("face,reason", [
@@ -982,3 +988,49 @@ def test_study_method_change_applies_live():
     assert _run(pipeline, 7.0, _face(pitch=-40), PERSON).state is FocusState.DISTRACTED
     pipeline.reconfigure(_method_cfg(StudyMethod.TABLET))
     assert _run(pipeline, 10.0, _face(pitch=-40), PERSON, start=7.0).state is FocusState.FOCUSED
+
+
+# --- tolerance around the monitors ----------------------------------------------------
+
+@pytest.mark.parametrize("method", [StudyMethod.COMPUTER, StudyMethod.MIXED])
+def test_monitor_is_kept_for_small_moves_past_its_edge(method):
+    cfg = _method_cfg(method).features
+    zones = compute_screen_zones(cfg)
+    edge = zones.monitors[0].core_yaw[1] + zones.margin
+    just_out = HeadPose(edge + 0.5 * cfg.monitor_exit_margin, -5, 0)
+    far_out = HeadPose(edge + cfg.monitor_exit_margin + 2, -5, 0)
+    # Entering from outside needs the normal zone; leaving needs the extra exit margin.
+    assert extract_gaze_features(just_out, cfg, zones).monitor is None
+    assert extract_gaze_features(just_out, cfg, zones, previous_monitor=0).monitor == 0
+    assert extract_gaze_features(far_out, cfg, zones, previous_monitor=0).monitor is None
+
+
+def test_tilted_head_is_not_kept_on_the_monitor():
+    gaze = extract_gaze_features(HeadPose(0, -5, 50), CFG.features, previous_monitor=0)
+    assert gaze.monitor is None and gaze.direction is Attention.HEAD_TILTED
+
+
+@pytest.mark.parametrize("method", [StudyMethod.COMPUTER, StudyMethod.MIXED])
+def test_small_head_drift_past_the_monitor_edge_stays_focused(method):
+    pipeline = FeaturePipeline(_method_cfg(method))
+    zones = pipeline.screen_zones
+    edge = zones.monitors[0].core_yaw[1] + zones.margin
+    _run(pipeline, 3.0, _face(yaw=0), PERSON)
+    analysis = _run(pipeline, 10.0, _face(yaw=edge + 3), PERSON, start=3.0)
+    assert analysis.state is FocusState.FOCUSED
+    assert analysis.reason.code is ReasonCode.ON_MONITOR
+
+
+def test_looking_clearly_away_still_distracts_after_the_short_default():
+    pipeline = FeaturePipeline(CFG)
+    _run(pipeline, 3.0, _face(), PERSON)
+    analysis = _run(pipeline, 6.0, _face(yaw=70), PERSON, start=3.0)
+    assert analysis.state is FocusState.DISTRACTED
+
+
+def test_brief_glance_away_does_not_distract():
+    pipeline = FeaturePipeline(CFG)
+    _run(pipeline, 3.0, _face(), PERSON)
+    _run(pipeline, 3.5, _face(yaw=70), PERSON, start=3.0)
+    analysis = _run(pipeline, 6.0, _face(), PERSON, start=3.5)
+    assert analysis.state is FocusState.FOCUSED

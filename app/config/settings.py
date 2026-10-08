@@ -150,7 +150,10 @@ class FeatureSettings:
     head_yaw_ratio: float = 0.7
     head_pitch_ratio: float = 0.5
     # Tolerance (degrees) added around every monitor; derived from the sensitivity setting.
-    attention_margin: float = 14.0
+    attention_margin: float = 16.0
+    # Extra tolerance while already looking at a monitor, so small head movements at its
+    # edge do not count as looking away (hysteresis).
+    monitor_exit_margin: float = 6.0
     # Beyond this head yaw the face landmarker usually loses the face.
     face_tracking_limit: float = 45.0
     # Vertical field of view MediaPipe's face geometry assumes; used to express the
@@ -164,11 +167,9 @@ class FeatureSettings:
     calibration_sample_every_s: float = 0.5
     calibration_max_error: float = 20.0
     calibration_max_offset: float = 15.0
-    # Tablet / notebook study: head pitch (degrees, relative to the line towards the
-    # camera) below which the user is looking down at the desk, and the largest head
-    # yaw that still counts as the desk in front of them.
-    desk_pitch_max: float = -12.0
-    desk_max_yaw: float = 40.0
+    # Tablet / notebook and mixed study: any head pitch below this (degrees, relative to
+    # the line towards the camera) counts as looking down at the desk, in any direction.
+    desk_pitch_max: float = 0.0
     # Head roll beyond this (e.g. resting the head on a hand) counts as off-screen.
     max_head_roll: float = 35.0
     # Extra tolerance on top of the monitor zones for a turned torso (pose only).
@@ -203,11 +204,11 @@ class StateSettings:
     away_after_s: float = 3.0
     # Someone "visible" but without any movement for this long -> AWAY (an empty
     # chair, a coat or a photo that the detectors mistake for a person).
-    still_away_after_s: float = 60.0
+    still_away_after_s: float = 30.0
     # Continuous time looking away from the monitors before DISTRACTED.
-    look_away_after_s: float = 5.0
+    look_away_after_s: float = 1.0
     # Continuous time looking at a visible phone before DISTRACTED.
-    phone_after_s: float = 3.0
+    phone_after_s: float = 1.0
     # Mean normalised landmark displacement per second below which nothing moves.
     still_motion_threshold: float = 0.01
     # A candidate state must persist this long before it is displayed (prevents flicker).

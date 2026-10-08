@@ -176,6 +176,8 @@ class FeaturePipeline:
         self._zones = compute_screen_zones(config.features)
         self._last_monitor = self._out_of_view_monitor = None
         self._last_on_desk = False
+        # Monitor looked at in the previous frame (for the exit hysteresis).
+        self._gaze_monitor: int | None = None
 
     @property
     def screen_zones(self) -> ScreenZones:
@@ -207,7 +209,8 @@ class FeaturePipeline:
             # The phone is compared with its position in the image, i.e. relative to the
             # optical axis, so that check uses the uncorrected direction (minus the bias).
             phone_direction = HeadPose(smoothed.yaw, smoothed.pitch - offset, smoothed.roll)
-        gaze = extract_gaze_features(head_pose, cfg.features, self._zones)
+        gaze = extract_gaze_features(head_pose, cfg.features, self._zones, self._gaze_monitor)
+        self._gaze_monitor = gaze.monitor
         pose_features = extract_pose_features(pose, frame_size, cfg.features, cfg.detection)
         person = pose.detected or face.detected or objects.person_detected
 

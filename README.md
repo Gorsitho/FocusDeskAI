@@ -69,15 +69,15 @@ behaviour timer instead of resetting it, and a new state is shown only after it 
 persisted for 1 s.
 
 1. **AWAY** – nobody detected for 3 s, or no movement at all for the
-   *No movement before away* time (default 60 s; catches an empty chair or a coat that the
+   *No movement before away* time (default 30 s; catches an empty chair or a coat that the
    detectors mistake for a person).
 2. **DISTRACTED (phone)** – a phone is visible **and** the head points towards the phone's
-   bounding box, for the phone duration (default 3 s). A phone on the desk while you look at
+   bounding box, for the phone duration (default 1 s). A phone on the desk while you look at
    a monitor stays `FOCUSED`; a phone held up close to your face in your line of sight counts
    even when a monitor is behind it.
 3. **DISTRACTED** – looking outside every monitor (left/right/up/down/between monitors,
    strong head roll), or the face is hidden while the body is visible, for the distraction
-   duration (default 5 s).
+   duration (default 1 s).
 4. **FOCUSED** – otherwise.
 
 **BREAK** is set with the ☕ Break button and pauses distraction detection until you resume.

@@ -172,3 +172,16 @@ def test_settings_without_study_method_use_computer(tmp_path):
 @pytest.mark.parametrize("method", list(StudyMethod))
 def test_apply_user_settings_maps_study_method(method):
     assert apply_user_settings(Settings(), UserSettings(study_method=method)).features.study_method is method
+
+
+def test_default_durations():
+    user, state = UserSettings(), Settings().state
+    assert (user.distraction_after_s, user.phone_distraction_after_s, user.no_movement_away_after_s) == (
+        1.0, 1.0, 30.0)
+    assert (state.look_away_after_s, state.phone_after_s, state.still_away_after_s) == (1.0, 1.0, 30.0)
+
+
+def test_default_sensitivity_is_more_tolerant_around_monitors():
+    features = apply_user_settings(Settings(), UserSettings()).features
+    assert features.attention_margin == pytest.approx(16.0)
+    assert features.monitor_exit_margin > 0

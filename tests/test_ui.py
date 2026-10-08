@@ -470,11 +470,18 @@ def test_settings_marks_monitor_layout_unneeded_for_tablet(qapp):
     assert dialog.workspace_editor.isEnabled()
     assert not dialog._workspace_unneeded.isVisible()
     _click(dialog.method_picker.card(StudyMethod.TABLET))
+    # The whole section is disabled and greyed out, and screens cannot be configured.
+    assert not dialog._workspace_box.isEnabled()
     assert not dialog.workspace_editor.isEnabled()
+    assert dialog.workspace_editor.graphicsEffect() is not None
     assert dialog._workspace_unneeded.isVisible()
+    _click(dialog.workspace_editor._monitor_group.button(3))
     assert dialog.result_settings().workspace.monitor_count == 2
     _click(dialog.method_picker.card(StudyMethod.COMPUTER))
-    assert dialog.workspace_editor.isEnabled()
+    assert dialog._workspace_box.isEnabled() and dialog.workspace_editor.isEnabled()
+    assert dialog.workspace_editor.graphicsEffect() is None
+    _click(dialog.workspace_editor._monitor_group.button(3))
+    assert dialog.result_settings().workspace.monitor_count == 3
 
 
 def test_restore_defaults_keeps_the_study_method(qapp):
@@ -488,3 +495,17 @@ def test_dashboard_shows_desk_focus(qapp):
     features = FrameFeatures(timestamp=0.0, person_detected=True, attention=Attention.DESK)
     dashboard.update_analysis(FrameAnalysis(features, FocusState.FOCUSED, Reason(ReasonCode.ON_DESK)))
     assert dashboard._reason.text() == "Studying at the desk"
+
+
+def test_settings_dialog_shows_new_default_durations(qapp):
+    dialog = SettingsDialog(UserSettings())
+    assert (dialog._distraction.value(), dialog._phone.value(), dialog._no_movement.value()) == (1.0, 1.0, 30.0)
+    dialog._distraction.setValue(9)
+    dialog._restore_defaults()
+    assert dialog.result_settings().distraction_after_s == 1.0
+
+
+def test_settings_opened_in_tablet_mode_starts_greyed_out(qapp):
+    dialog = SettingsDialog(UserSettings(study_method=StudyMethod.TABLET))
+    assert not dialog._workspace_box.isEnabled()
+    assert dialog.workspace_editor.graphicsEffect() is not None

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -465,7 +466,12 @@ class SettingsDialog(QDialog):
     def _update_workspace_state(self) -> None:
         # The layout is kept for switching back, but tablet study does not use it.
         unneeded = self._picker.method is StudyMethod.TABLET
-        self._workspace.setEnabled(not unneeded)
+        # Disabling the whole section blocks every control; the fade also greys the
+        # custom-drawn desk plan, which does not render a disabled look by itself.
+        self._workspace_box.setEnabled(not unneeded)
+        fade = QGraphicsOpacityEffect(self._workspace)
+        fade.setOpacity(0.35)
+        self._workspace.setGraphicsEffect(fade if unneeded else None)
         self._workspace_unneeded.setVisible(unneeded)
 
     def _on_language(self) -> None:

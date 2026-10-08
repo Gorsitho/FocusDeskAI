@@ -161,8 +161,11 @@ class GazeFeatures:
 
 
 def extract_gaze_features(
-    head_pose: HeadPose | None, cfg: FeatureSettings, zones: ScreenZones | None = None
+    head_pose: HeadPose | None, cfg: FeatureSettings, zones: ScreenZones | None = None,
+    previous_monitor: int | None = None,
 ) -> GazeFeatures:
+    """`previous_monitor`, the monitor looked at in the last frame, is kept while the head
+    stays within `monitor_exit_margin` beyond its zone."""
     if head_pose is None:
         return GazeFeatures()
     zones = zones or compute_screen_zones(cfg)
@@ -170,21 +173,25 @@ def extract_gaze_features(
     method = cfg.study_method
     tilted = abs(head_pose.roll) > cfg.max_head_roll
     if method is StudyMethod.TABLET:
-        # No monitors: directions are judged against the desk in front of the user.
+        # No monitors: any downward direction is the desk; everything else is off it.
         monitor = None
-        turned_left = head_pose.yaw > cfg.desk_max_yaw
-        turned_right = head_pose.yaw < -cfg.desk_max_yaw
         down = head_pose.pitch < cfg.desk_pitch_max
         up = not down
-        on_desk = down and not (turned_left or turned_right)
+        turned_left = not down and head_pose.yaw > zones.yaw_max
+        turned_right = not down and head_pose.yaw < zones.yaw_min
+        on_desk = down
     else:
         monitor = None if tilted else zones.monitor_at(head_pose.yaw, head_pose.pitch)
+        if monitor is None and not tilted and previous_monitor is not None:
+            zone = zones.monitors[previous_monitor]
+            if zone.contains(head_pose.yaw, head_pose.pitch, zones.margin + cfg.monitor_exit_margin):
+                monitor = previous_monitor
         turned_left = head_pose.yaw > zones.yaw_max
         turned_right = head_pose.yaw < zones.yaw_min
         down = head_pose.pitch < zones.pitch_min
         up = head_pose.pitch > zones.pitch_max
-        # Mixed: below the monitors, within their horizontal span, is the desk.
-        on_desk = method is StudyMethod.MIXED and down and not (turned_left or turned_right)
+        # Mixed: any downward direction off the monitors is the desk.
+        on_desk = method is StudyMethod.MIXED and monitor is None and head_pose.pitch < cfg.desk_pitch_max
     on_desk = on_desk and not tilted
 
     if monitor is not None:
