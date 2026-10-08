@@ -9,15 +9,19 @@ from app.features.gaze_features import (
     Attention,
     GazeFeatures,
     HeadPoseSmoother,
-    ScreenZone,
-    compute_screen_zone,
+    PitchCalibrator,
+    ScreenZones,
+    compute_screen_zones,
     extract_gaze_features,
+    relative_to_camera_line,
 )
 from app.features.phone_features import (
     PhoneFeatures,
     PhoneTracker,
     face_anchor,
     is_looking_at_phone,
+    phone_gaze_angle,
+    phone_near_face,
 )
 from app.features.pose_features import PoseFeatures, extract_pose_features
 from app.vision.face_detection import FaceResult
@@ -29,10 +33,27 @@ from app.vision.pose_detection import PoseResult
 class FocusState(str, Enum):
     FOCUSED = "FOCUSED"
     DISTRACTED = "DISTRACTED"
-    IDLE = "IDLE"
     AWAY = "AWAY"
     # Set manually by the user from the UI; never produced by the rules.
     BREAK = "BREAK"
+
+
+class ReasonCode(str, Enum):
+    ABSENT = "absent"
+    NO_MOVEMENT = "no_movement"
+    PHONE = "phone"
+    LOOKING_AWAY = "looking_away"
+    ON_MONITOR = "on_monitor"
+
+
+@dataclass(frozen=True)
+class Reason:
+    """Language-neutral explanation of a state; the UI turns it into text."""
+
+    code: ReasonCode
+    seconds: float = 0.0
+    attention: Attention | None = None
+    monitor: int | None = None
 
 
 @dataclass
@@ -42,12 +63,17 @@ class FrameFeatures:
     face_detected: bool = False
     # A phone is (or was very recently) visible; this alone is not a distraction.
     phone_detected: bool = False
-    # Smoothed head orientation.
+    # Smoothed head orientation relative to the line towards the camera, with the
+    # learned pitch bias removed. Used for every attention decision.
     head_pose: HeadPose | None = None
+    # Learned head-pitch bias (degrees) that has been subtracted.
+    pitch_calibration: float = 0.0
     pose: PoseFeatures = field(default_factory=PoseFeatures)
     gaze: GazeFeatures = field(default_factory=GazeFeatures)
     phone: PhoneFeatures = field(default_factory=PhoneFeatures)
     attention: Attention = Attention.ABSENT
+    # Monitor being looked at (0-based), if any.
+    monitor: int | None = None
     activity: ActivityFeatures = field(default_factory=ActivityFeatures)
 
 
@@ -55,26 +81,26 @@ class FrameFeatures:
 class FrameAnalysis:
     features: FrameFeatures
     state: FocusState
-    # Short human-readable explanation of the displayed state.
-    reason: str = ""
+    reason: Reason | None = None
 
 
-def classify(features: FrameFeatures, cfg: StateSettings) -> tuple[FocusState, str]:
+def classify(features: FrameFeatures, cfg: StateSettings) -> tuple[FocusState, Reason]:
     """Rule-based classification of observable behaviour, in priority order.
 
     Every rule depends on how long a behaviour has lasted, never on a single frame.
     """
     activity = features.activity
     if activity.seconds_since_person_seen >= cfg.away_after_s:
-        return FocusState.AWAY, "Nobody in front of the camera"
+        return FocusState.AWAY, Reason(ReasonCode.ABSENT)
+    if activity.seconds_still >= cfg.still_away_after_s:
+        return FocusState.AWAY, Reason(ReasonCode.NO_MOVEMENT, activity.seconds_still)
     if activity.seconds_looking_at_phone >= cfg.phone_after_s:
-        return FocusState.DISTRACTED, f"Looking at phone for {activity.seconds_looking_at_phone:.0f} s"
+        return FocusState.DISTRACTED, Reason(ReasonCode.PHONE, activity.seconds_looking_at_phone)
     if activity.seconds_looking_away >= cfg.look_away_after_s:
-        what = features.attention.value if features.attention is not Attention.ON_SCREEN else "Looking away"
-        return FocusState.DISTRACTED, f"{what} for {activity.seconds_looking_away:.0f} s"
-    if activity.seconds_still >= cfg.still_idle_after_s:
-        return FocusState.IDLE, f"No movement for {activity.seconds_still:.0f} s"
-    return FocusState.FOCUSED, "Attention on the monitors"
+        return FocusState.DISTRACTED, Reason(
+            ReasonCode.LOOKING_AWAY, activity.seconds_looking_away, attention=features.attention
+        )
+    return FocusState.FOCUSED, Reason(ReasonCode.ON_MONITOR, monitor=features.monitor)
 
 
 def classify_state(features: FrameFeatures, cfg: StateSettings) -> FocusState:
@@ -103,7 +129,8 @@ class StateStabilizer:
 
 
 def resolve_attention(
-    person: bool, gaze: GazeFeatures, looking_at_phone: bool, pose: PoseFeatures, zone: ScreenZone, torso_margin: float
+    person: bool, gaze: GazeFeatures, looking_at_phone: bool, pose: PoseFeatures, zones: ScreenZones,
+    torso_margin: float,
 ) -> Attention:
     if not person:
         return Attention.ABSENT
@@ -113,7 +140,7 @@ def resolve_attention(
         return gaze.direction
     # No face: fall back on the body. Either way the user is not visibly facing a monitor.
     if pose.torso_yaw is not None and not (
-        zone.yaw_min - torso_margin <= pose.torso_yaw <= zone.yaw_max + torso_margin
+        zones.yaw_min - torso_margin <= pose.torso_yaw <= zones.yaw_max + torso_margin
     ):
         return Attention.BODY_TURNED
     return Attention.NO_FACE
@@ -127,17 +154,24 @@ class FeaturePipeline:
         self._smoother = HeadPoseSmoother(config.features.head_smoothing_s)
         self._phone = PhoneTracker(config.features.phone_hold_s)
         self._stabilizer = StateStabilizer(config.state.min_state_duration_s)
-        self._reasons: dict[FocusState, str] = {}
+        self._reasons: dict[FocusState, Reason] = {}
+        # Monitor the user was looking at when the face was lost, if that monitor lies
+        # beyond the angle the face landmarker can track.
+        self._out_of_view_monitor: int | None = None
+        self._last_monitor: int | None = None
+        self._last_yaw = 0.0
+        self._calibrator = PitchCalibrator(config.features)
         self.reconfigure(config)
 
     def reconfigure(self, config: Settings) -> None:
         """Apply new thresholds and workspace layout without losing temporal history."""
         self._config = config
-        self._zone = compute_screen_zone(config.features)
+        self._zones = compute_screen_zones(config.features)
+        self._last_monitor = self._out_of_view_monitor = None
 
     @property
-    def screen_zone(self) -> ScreenZone:
-        return self._zone
+    def screen_zones(self) -> ScreenZones:
+        return self._zones
 
     def process(
         self,
@@ -149,26 +183,54 @@ class FeaturePipeline:
     ) -> FrameAnalysis:
         cfg = self._config
         raw_head = estimate_head_pose(face.transform) if face.detected else None
-        head_pose = self._smoother.update(timestamp, raw_head)
-        gaze = extract_gaze_features(head_pose, cfg.features, self._zone)
+        smoothed = self._smoother.update(timestamp, raw_head)
+        anchor = face_anchor(face.landmarks, frame_size) if face.detected else None
+        head_pose = phone_direction = None
+        if smoothed is not None:
+            towards_camera = smoothed
+            if anchor is not None:
+                towards_camera = relative_to_camera_line(
+                    smoothed, anchor, frame_size, cfg.features.camera_vertical_fov
+                )
+            offset = self._calibrator.update(timestamp, towards_camera, self._zones)
+            head_pose = HeadPose(towards_camera.yaw, towards_camera.pitch - offset, towards_camera.roll)
+            # The phone is compared with its position in the image, i.e. relative to the
+            # optical axis, so that check uses the uncorrected direction (minus the bias).
+            phone_direction = HeadPose(smoothed.yaw, smoothed.pitch - offset, smoothed.roll)
+        gaze = extract_gaze_features(head_pose, cfg.features, self._zones)
         pose_features = extract_pose_features(pose, frame_size, cfg.features, cfg.detection)
         person = pose.detected or face.detected or objects.person_detected
 
         phone_center = self._phone.update(timestamp, objects)
+        near_face = phone_near_face(
+            self._phone.box, face.landmarks if face.detected else None, frame_size, cfg.features
+        )
         looking_at_phone = person and is_looking_at_phone(
-            phone_center, head_pose, face_anchor(face.landmarks, frame_size) if face.detected else None,
-            self._zone, pose_features, cfg.features,
+            phone_center, head_pose, anchor, self._zones, pose_features, cfg.features, phone_direction, near_face
+        )
+        gaze_angle = (
+            phone_gaze_angle(phone_center, phone_direction, anchor, cfg.features)
+            if phone_center is not None and phone_direction is not None and anchor is not None else None
         )
         attention = resolve_attention(
-            person, gaze, looking_at_phone, pose_features, self._zone, cfg.features.torso_margin
+            person, gaze, looking_at_phone, pose_features, self._zones, cfg.features.torso_margin
         )
+        monitor = gaze.monitor
+        facing_screen = gaze.facing_screen
+        if head_pose is not None:
+            self._last_monitor, self._last_yaw = monitor, head_pose.yaw
+            self._out_of_view_monitor = None
+        elif person and attention in (Attention.NO_FACE, Attention.BODY_TURNED):
+            monitor = self._monitor_beyond_tracking()
+            if monitor is not None:
+                attention, facing_screen = Attention.ON_SCREEN, True
+        else:
+            self._last_monitor = self._out_of_view_monitor = None
 
         tracking_points = ActivityTracker.tracking_points_from(
             pose.landmarks, face.landmarks, cfg.detection.min_landmark_visibility
         )
-        activity = self._activity.update(
-            timestamp, person, gaze.facing_screen, looking_at_phone, tracking_points
-        )
+        activity = self._activity.update(timestamp, person, facing_screen, looking_at_phone, tracking_points)
 
         features = FrameFeatures(
             timestamp=timestamp,
@@ -176,15 +238,31 @@ class FeaturePipeline:
             face_detected=face.detected,
             phone_detected=phone_center is not None,
             head_pose=head_pose,
+            pitch_calibration=self._calibrator.offset,
             pose=pose_features,
             gaze=gaze,
             phone=PhoneFeatures(
-                visible=phone_center is not None, center=phone_center, looking_at_phone=looking_at_phone
+                visible=phone_center is not None, center=phone_center,
+                looking_at_phone=looking_at_phone, gaze_angle=gaze_angle, near_face=near_face,
             ),
             attention=attention,
+            monitor=monitor,
             activity=activity,
         )
         candidate, reason = classify(features, cfg.state)
         self._reasons[candidate] = reason
         state = self._stabilizer.update(candidate, timestamp)
-        return FrameAnalysis(features=features, state=state, reason=self._reasons.get(state, ""))
+        return FrameAnalysis(features=features, state=state, reason=self._reasons.get(state))
+
+    def _monitor_beyond_tracking(self) -> int | None:
+        """Keep crediting a far-side monitor after the face turned out of the camera's view."""
+        if self._out_of_view_monitor is None and self._last_monitor is not None:
+            zone = self._zones.monitors[self._last_monitor]
+            limit = self._config.features.face_tracking_limit
+            # Only when the monitor extends beyond the trackable range *and* the head was
+            # already turned far towards it, i.e. the face was lost because of the turn.
+            if (max(abs(zone.core_yaw[0]), abs(zone.core_yaw[1])) >= limit
+                    and abs(self._last_yaw) >= limit - 15.0):
+                self._out_of_view_monitor = self._last_monitor
+            self._last_monitor = None
+        return self._out_of_view_monitor

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 from app.features.feature_pipeline import FrameAnalysis
 from app.features.gaze_features import Attention
 from app.features.phone_features import NOSE_TIP
+from app.ui.i18n import tr
 from app.vision.face_detection import FaceResult
 from app.vision.object_detection import ObjectResult
 from app.vision.pose_detection import PoseLandmark, PoseResult
@@ -86,7 +87,7 @@ class CameraWidget(QLabel):
         self.setMinimumSize(480, 360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._pixmap: QPixmap | None = None
-        self.show_message("Starting camera…")
+        self.show_message(tr("status.starting_camera"))
 
     def show_message(self, text: str) -> None:
         self._pixmap = None

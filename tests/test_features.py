@@ -4,20 +4,24 @@ import math
 import numpy as np
 import pytest
 
-from app.config.settings import CameraPosition, Settings
+from app.config.settings import CameraEdge, MonitorPlacement, Settings, Workspace, arc_layout
 from app.features.activity_features import ActivityFeatures, ActivityTracker, BehaviorTimer
 from app.features.feature_pipeline import (
     FeaturePipeline,
     FocusState,
     FrameFeatures,
+    ReasonCode,
     StateStabilizer,
+    classify,
     classify_state,
 )
 from app.features.gaze_features import (
     Attention,
     HeadPoseSmoother,
-    compute_screen_zone,
+    PitchCalibrator,
+    compute_screen_zones,
     extract_gaze_features,
+    relative_to_camera_line,
 )
 from app.features.phone_features import NOSE_TIP, PhoneTracker, is_looking_at_phone
 from app.features.pose_features import PoseFeatures, Posture, extract_pose_features
@@ -171,7 +175,9 @@ def _features(**activity):
         ({"seconds_looking_at_phone": 2.0}, FocusState.FOCUSED),
         ({"seconds_looking_away": 6.0}, FocusState.DISTRACTED),
         ({"seconds_looking_away": 4.0}, FocusState.FOCUSED),
-        ({"seconds_still": 75.0}, FocusState.IDLE),
+        ({"seconds_still": 75.0}, FocusState.AWAY),
+        ({"seconds_still": 30.0}, FocusState.FOCUSED),
+        ({"seconds_still": 75.0, "seconds_looking_at_phone": 10.0}, FocusState.AWAY),
         ({"seconds_since_person_seen": 5.0, "seconds_looking_at_phone": 10.0}, FocusState.AWAY),
     ],
 )
@@ -215,53 +221,146 @@ def test_nobody_seen_yet_is_away_immediately():
     assert analysis.state is FocusState.AWAY
 
 
-# --- screen zone / workspace layout -------------------------------------------
+# --- 3D workspace / monitor zones -------------------------------------------------
+
+def _ws_cfg(**workspace):
+    return _features_cfg(workspace=Workspace(**workspace))
+
 
 def test_single_centered_monitor_zone_is_symmetric():
-    zone = compute_screen_zone(CFG.features)
-    assert zone.yaw_min == pytest.approx(-zone.yaw_max)
-    assert zone.core_pitch == (-CFG.features.monitor_pitch_span, 0.0)
+    zones = compute_screen_zones(CFG.features)
+    (zone,) = zones.monitors
+    assert zone.core_yaw[0] == pytest.approx(-zone.core_yaw[1])
+    # Camera on top: the whole screen lies below the camera.
+    assert zone.core_pitch[1] < 0
 
 
-def test_more_monitors_widen_the_zone():
-    zones = [compute_screen_zone(_features_cfg(monitor_count=n)) for n in (1, 2, 3)]
-    widths = [z.yaw_max - z.yaw_min for z in zones]
-    assert widths[0] < widths[1] < widths[2]
+def test_arc_layout_is_a_semicircle_facing_the_user():
+    for count in (1, 2, 3):
+        monitors = arc_layout(count, distance=0.7)
+        assert len(monitors) == count
+        for m in monitors:
+            assert math.hypot(m.x, m.z) == pytest.approx(0.7, abs=1e-3)
+            # Facing the user: the rotation equals the bearing from the user.
+            assert m.angle == pytest.approx(math.degrees(math.atan2(m.x, m.z)), abs=0.05)
+    left, middle, right = arc_layout(3)
+    assert left.x < middle.x == 0 < right.x
 
 
-def test_side_camera_shifts_the_zone():
-    # Camera on the user's left: working means looking to the camera's right (negative yaw).
-    left = compute_screen_zone(_features_cfg(camera_position=CameraPosition.LEFT))
-    right = compute_screen_zone(_features_cfg(camera_position=CameraPosition.RIGHT))
-    assert left.yaw_center < 0 < right.yaw_center
-    assert left.yaw_center == pytest.approx(-right.yaw_center)
+def test_three_monitors_each_get_their_own_zone():
+    cfg = _ws_cfg(monitors=arc_layout(3), camera_monitor=1)
+    zones = compute_screen_zones(cfg)
+    m1, m2, m3 = zones.monitors
+    # Monitor 1 is on the user's left, i.e. positive yaw (HeadPose convention).
+    assert m1.center[0] > m2.center[0] > m3.center[0]
+    for zone in zones.monitors:
+        yaw, pitch = zone.center
+        assert extract_gaze_features(HeadPose(yaw, pitch, 0), cfg).monitor == zone.index
 
 
-def test_camera_position_changes_what_counts_as_on_screen():
-    head = HeadPose(yaw=-35, pitch=-5, roll=0)  # turned to the user's right
-    centered = _features_cfg(camera_position=CameraPosition.TOP_CENTER)
-    camera_left = _features_cfg(camera_position=CameraPosition.LEFT)
-    assert extract_gaze_features(head, centered).direction is Attention.RIGHT
-    assert extract_gaze_features(head, camera_left).facing_screen is True
+@pytest.mark.parametrize("target,expected", [(0, 0), (1, 1), (2, 2)])
+def test_looking_at_any_monitor_is_on_screen(target, expected):
+    cfg = _ws_cfg(monitors=arc_layout(3), camera_monitor=1)
+    yaw, pitch = compute_screen_zones(cfg).monitors[target].center
+    gaze = extract_gaze_features(HeadPose(yaw, pitch, 0), cfg)
+    assert gaze.facing_screen is True
+    assert gaze.direction is Attention.ON_SCREEN
+    assert gaze.monitor == expected
 
 
-def test_camera_below_monitors_expects_looking_up():
-    bottom = _features_cfg(camera_position=CameraPosition.BOTTOM_CENTER, attention_margin=5.0)
-    top = _features_cfg(attention_margin=5.0)
-    assert compute_screen_zone(bottom).core_pitch == (0.0, CFG.features.monitor_pitch_span)
-    up = HeadPose(yaw=0, pitch=12, roll=0)
-    assert extract_gaze_features(up, bottom).facing_screen is True
-    assert extract_gaze_features(up, top).direction is Attention.UP
+def test_looking_beyond_the_outer_monitor_is_off_screen():
+    cfg = _ws_cfg(monitors=arc_layout(2), camera_monitor=0)
+    zones = compute_screen_zones(cfg)
+    beyond_right = zones.yaw_min - 10
+    gaze = extract_gaze_features(HeadPose(beyond_right, -7, 0), cfg)
+    assert gaze.facing_screen is False and gaze.direction is Attention.RIGHT
 
 
-def test_top_left_camera_with_two_monitors():
-    zone = compute_screen_zone(_features_cfg(monitor_count=2, camera_position=CameraPosition.TOP_LEFT))
-    # Camera above the left monitor: the right monitor is to the camera's right (negative yaw).
-    assert zone.core_yaw == pytest.approx((-45.0, 15.0))
+def test_gap_between_monitors_is_not_a_monitor():
+    # Two monitors far to each side, nothing straight ahead.
+    monitors = (MonitorPlacement(-0.6, 0.35, angle=-60), MonitorPlacement(0.6, 0.35, angle=60))
+    cfg = dataclasses.replace(_ws_cfg(monitors=monitors), attention_margin=5.0)
+    zones = compute_screen_zones(cfg)
+    middle = (zones.monitors[0].core_yaw[0] + zones.monitors[1].core_yaw[1]) / 2
+    gaze = extract_gaze_features(HeadPose(middle, -7, 0), cfg)
+    assert gaze.monitor is None and gaze.direction is Attention.BETWEEN
+
+
+def test_camera_on_another_monitor_shifts_the_zones():
+    on_left = compute_screen_zones(_ws_cfg(monitors=arc_layout(2), camera_monitor=0))
+    on_right = compute_screen_zones(_ws_cfg(monitors=arc_layout(2), camera_monitor=1))
+    # The monitor carrying the camera is always around yaw 0.
+    assert on_left.monitors[0].center[0] == pytest.approx(0, abs=1)
+    assert on_right.monitors[1].center[0] == pytest.approx(0, abs=1)
+    # The other monitor is to the camera's right (negative yaw) or left (positive yaw).
+    assert on_left.monitors[1].center[0] < -10
+    assert on_right.monitors[0].center[0] > 10
+
+
+def test_camera_below_monitor_expects_looking_up():
+    zones = compute_screen_zones(_ws_cfg(camera_edge=CameraEdge.BOTTOM))
+    assert zones.monitors[0].core_pitch[0] > 0
+    cfg = _ws_cfg(camera_edge=CameraEdge.BOTTOM)
+    assert extract_gaze_features(HeadPose(0, 8, 0), cfg).facing_screen is True
+
+
+def test_moving_closer_widens_the_monitor_zone():
+    far = compute_screen_zones(_ws_cfg(monitors=arc_layout(1, distance=1.0))).monitors[0]
+    near = compute_screen_zones(_ws_cfg(monitors=arc_layout(1, distance=0.4))).monitors[0]
+    assert near.core_yaw[1] - near.core_yaw[0] > far.core_yaw[1] - far.core_yaw[0]
+
+
+def test_sitting_off_center_shifts_the_zone():
+    # The user sits 30 cm to the right of a single monitor: it is now to their left.
+    cfg = _ws_cfg(person_x=0.3, monitors=(MonitorPlacement(0.0, 0.65),), camera_edge=CameraEdge.LEFT)
+    centered = _ws_cfg(monitors=(MonitorPlacement(0.0, 0.65),), camera_edge=CameraEdge.LEFT)
+    assert compute_screen_zones(cfg).monitors[0].center[0] > compute_screen_zones(centered).monitors[0].center[0]
+
+
+def test_monitor_angle_changes_its_apparent_width():
+    facing = compute_screen_zones(_ws_cfg(monitors=(MonitorPlacement(0.0, 0.65, angle=0),))).monitors[0]
+    turned = compute_screen_zones(_ws_cfg(monitors=(MonitorPlacement(0.0, 0.65, angle=60),))).monitors[0]
+    assert turned.core_yaw[1] - turned.core_yaw[0] < facing.core_yaw[1] - facing.core_yaw[0]
 
 
 def test_strong_head_roll_is_off_screen():
     assert extract_gaze_features(HeadPose(0, -5, 50), CFG.features).direction is Attention.HEAD_TILTED
+
+
+def test_far_side_monitor_keeps_focus_when_face_leaves_the_camera():
+    # Camera on the left monitor; the right monitor needs a large head turn.
+    pipeline = FeaturePipeline(dataclasses.replace(
+        CFG, features=_ws_cfg(monitors=arc_layout(3), camera_monitor=0)))
+    far_zone = pipeline.screen_zones.monitors[2]
+    assert max(abs(v) for v in far_zone.core_yaw) >= CFG.features.face_tracking_limit
+    yaw, pitch = far_zone.center
+    person = ObjectResult(person_detected=True)
+    _run(pipeline, 2.0, _face(yaw=yaw, pitch=pitch), person)
+    no_face = FaceResult(False)
+    analysis = _run(pipeline, 12.0, no_face, person, start=2.0)
+    assert analysis.features.monitor == 2
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_lost_face_on_a_near_monitor_still_counts_as_looking_away():
+    pipeline = FeaturePipeline(CFG)
+    person = ObjectResult(person_detected=True)
+    _run(pipeline, 2.0, _face(), person)
+    analysis = _run(pipeline, 9.0, FaceResult(False), person, start=2.0)
+    assert analysis.state is FocusState.DISTRACTED
+
+
+def test_workspace_change_applies_live():
+    pipeline = FeaturePipeline(CFG)
+    person = ObjectResult(person_detected=True)
+    # Head turned 40 deg: off-screen with one monitor ...
+    assert _run(pipeline, 8.0, _face(yaw=-40), person).state is FocusState.DISTRACTED
+    # ... but on monitor 2 once a second monitor is configured on that side.
+    pipeline.reconfigure(dataclasses.replace(
+        CFG, features=_ws_cfg(monitors=arc_layout(2), camera_monitor=0)))
+    analysis = _run(pipeline, 11.0, _face(yaw=-40), person, start=8.0)
+    assert analysis.features.monitor == 1
+    assert analysis.state is FocusState.FOCUSED
 
 
 # --- temporal smoothing ------------------------------------------------------------
@@ -321,7 +420,7 @@ def test_phone_tracker_holds_briefly():
 
 # --- looking at the phone ----------------------------------------------------------
 
-_ZONE = compute_screen_zone(CFG.features)
+_ZONE = compute_screen_zones(CFG.features)
 _ANCHOR = (320.0, 190.0)
 _PHONE_BELOW = (320.0, 430.0)
 
@@ -378,7 +477,7 @@ def test_phone_distraction_requires_configured_duration():
     assert early.state is FocusState.FOCUSED
     late = _run(pipeline, 4.6, looking_down, _phone_below(), start=2.5)
     assert late.state is FocusState.DISTRACTED
-    assert "phone" in late.reason.lower()
+    assert late.reason.code is ReasonCode.PHONE
 
 
 def test_looking_down_without_phone_uses_general_distraction_time():
@@ -388,7 +487,8 @@ def test_looking_down_without_phone_uses_general_distraction_time():
     assert _run(pipeline, 4.5, looking_down, person).state is FocusState.FOCUSED
     late = _run(pipeline, 7.0, looking_down, person, start=4.5)
     assert late.state is FocusState.DISTRACTED
-    assert "Looking down" in late.reason
+    assert late.reason.code is ReasonCode.LOOKING_AWAY
+    assert late.reason.attention is Attention.DOWN
 
 
 def test_returning_to_screen_recovers_focus():
@@ -440,3 +540,196 @@ def test_state_timers_reset():
 @pytest.mark.parametrize("seconds,text", [(0, "00:00"), (59.9, "00:59"), (2551, "42:31"), (3725, "1:02:05")])
 def test_format_duration(seconds, text):
     assert format_duration(seconds) == text
+
+
+# --- AWAY without movement ---------------------------------------------------------
+
+def test_no_movement_reason_and_threshold():
+    state, reason = classify(_features(seconds_still=61.0), CFG.state)
+    assert state is FocusState.AWAY and reason.code is ReasonCode.NO_MOVEMENT
+    short = dataclasses.replace(CFG.state, still_away_after_s=20.0)
+    assert classify_state(_features(seconds_still=25.0), short) is FocusState.AWAY
+
+
+def test_motionless_person_becomes_away_after_configured_time():
+    config = dataclasses.replace(CFG, state=dataclasses.replace(CFG.state, still_away_after_s=10.0))
+    pipeline = FeaturePipeline(config)
+    frozen = _face()  # identical landmarks every frame: no movement at all
+    person = ObjectResult(person_detected=True)
+    assert _run(pipeline, 8.0, frozen, person).state is FocusState.FOCUSED
+    analysis = _run(pipeline, 13.0, frozen, person, start=8.0)
+    assert analysis.state is FocusState.AWAY
+    assert analysis.reason.code is ReasonCode.NO_MOVEMENT
+
+
+def test_there_is_no_idle_state():
+    assert [s.value for s in FocusState] == ["FOCUSED", "DISTRACTED", "AWAY", "BREAK"]
+
+
+# --- phone + gaze direction against the 3D layout --------------------------------------
+
+def test_phone_ignored_while_looking_at_any_of_three_monitors():
+    cfg = _ws_cfg(monitors=arc_layout(3), camera_monitor=1)
+    zones = compute_screen_zones(cfg)
+    for zone in zones.monitors:
+        yaw, pitch = zone.center
+        head = HeadPose(yaw, pitch, 0)
+        assert not is_looking_at_phone(_PHONE_BELOW, head, _ANCHOR, zones, PoseFeatures(), cfg)
+
+
+def test_pipeline_phone_on_users_left_while_head_turned_there():
+    pipeline = FeaturePipeline(CFG)
+    # Raw frame: the user's left is the image right.
+    phone_left = _phone_at((560, 300, 620, 380))
+    analysis = _run(pipeline, 5.0, _face(yaw=45, pitch=-25), phone_left)
+    assert analysis.features.phone.looking_at_phone
+    assert analysis.state is FocusState.DISTRACTED
+    # Same head turn, phone on the other side: not phone use (just looking away, still short).
+    pipeline = FeaturePipeline(CFG)
+    phone_right = _phone_at((20, 300, 80, 380))
+    analysis = _run(pipeline, 4.0, _face(yaw=45, pitch=-25), phone_right)
+    assert not analysis.features.phone.looking_at_phone
+    assert analysis.state is FocusState.FOCUSED
+
+
+# --- perspective correction and pitch calibration ------------------------------------
+
+def test_centered_face_needs_no_perspective_correction():
+    pose = relative_to_camera_line(HeadPose(10, -5, 2), (320, 240), FRAME, 63.0)
+    assert (pose.yaw, pose.pitch, pose.roll) == pytest.approx((10, -5, 2))
+
+
+def test_off_center_face_looking_into_the_lens_reads_as_zero():
+    # Face low and on the image right: MediaPipe reports it turned right/up to see the lens.
+    focal = 240 / math.tan(math.radians(31.5))
+    anchor = (320 + 100, 240 + 80)
+    looking_at_lens = HeadPose(-math.degrees(math.atan(100 / focal)), math.degrees(math.atan(80 / focal)), 0)
+    pose = relative_to_camera_line(looking_at_lens, anchor, FRAME, 63.0)
+    assert pose.yaw == pytest.approx(0, abs=1e-6)
+    assert pose.pitch == pytest.approx(0, abs=1e-6)
+
+
+def _calibrate(calibrator, pitches, yaw=0.0, start=0.0):
+    zones = compute_screen_zones(CFG.features)
+    offset = 0.0
+    for i, pitch in enumerate(pitches):
+        offset = calibrator.update(start + i * 0.5, HeadPose(yaw, pitch, 0), zones)
+    return offset
+
+
+def test_calibrator_learns_a_constant_pitch_bias():
+    expected = compute_screen_zones(CFG.features).monitors[0].center[1]
+    calibrator = PitchCalibrator(CFG.features)
+    # Before enough samples, nothing is applied.
+    assert _calibrate(calibrator, [expected + 10] * 5) == 0.0
+    assert _calibrate(calibrator, [expected + 10] * 40, start=3.0) == pytest.approx(10, abs=0.01)
+
+
+def test_calibrator_ignores_phone_glances_and_is_capped():
+    expected = compute_screen_zones(CFG.features).monitors[0].center[1]
+    calibrator = PitchCalibrator(CFG.features)
+    # 60 % of the time looking far down at a phone must not shift the calibration.
+    pitches = [expected + 4 if i % 5 < 2 else expected - 35 for i in range(200)]
+    assert _calibrate(calibrator, pitches) == pytest.approx(4, abs=0.01)
+    capped = PitchCalibrator(CFG.features)
+    assert _calibrate(capped, [expected + 19] * 40) == CFG.features.calibration_max_offset
+
+
+def test_calibrator_ignores_samples_away_from_the_monitors():
+    calibrator = PitchCalibrator(CFG.features)
+    assert _calibrate(calibrator, [5.0] * 60, yaw=80) == 0.0
+
+
+def test_biased_user_reading_the_screen_is_not_flagged_as_looking_up():
+    # This user's head pitch reads ~16 deg higher than the model expects while working.
+    expected = compute_screen_zones(CFG.features).monitors[0].center[1]
+    strict = dataclasses.replace(CFG, features=dataclasses.replace(CFG.features, attention_margin=6.0))
+    pipeline = FeaturePipeline(strict)
+    person = ObjectResult(person_detected=True)
+    biased = _face(pitch=expected + 16, nose=(0.5, 0.5))
+    first = pipeline.process(0.0, FRAME, biased, PoseResult(False), person)
+    assert first.features.attention is Attention.UP  # before calibration
+    analysis = _run(pipeline, 30.0, biased, person, start=0.1)
+    assert analysis.features.pitch_calibration == pytest.approx(15.0, abs=1.5)
+    assert analysis.features.attention is Attention.ON_SCREEN
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_face_lost_at_small_yaw_does_not_credit_far_monitor():
+    pipeline = FeaturePipeline(dataclasses.replace(
+        CFG, features=_ws_cfg(monitors=arc_layout(3), camera_monitor=0)))
+    person = ObjectResult(person_detected=True)
+    # Like the live test: on monitor 2 at only -20 deg when the face disappears.
+    pitch = pipeline.screen_zones.monitors[1].center[1]
+    assert pipeline.screen_zones.monitors[1].core_yaw[0] < -20 < pipeline.screen_zones.monitors[1].core_yaw[1]
+    _run(pipeline, 2.0, _face(yaw=-20, pitch=pitch, nose=(0.5, 0.5)), person)
+    analysis = _run(pipeline, 9.0, FaceResult(False), person, start=2.0)
+    assert analysis.features.monitor is None
+    assert analysis.state is FocusState.DISTRACTED
+
+
+# --- phone held up near the face (live-test regression) --------------------------------
+
+def _real_face(yaw=0.0, pitch=0.0, center=(0.5, 0.45), size=0.35):
+    """Face whose landmarks span `size` of the frame height, like a user ~60 cm away."""
+    rng = np.random.default_rng(0)
+    landmarks = np.zeros((478, 3), np.float32)
+    landmarks[:, 0] = center[0] + rng.uniform(-0.5, 0.5, 478) * size * FRAME[1] / FRAME[0] * 0.8
+    landmarks[:, 1] = center[1] + rng.uniform(-0.5, 0.5, 478) * size
+    landmarks[NOSE_TIP, :2] = center
+    return FaceResult(True, landmarks=landmarks, transform=_head_transform(yaw, pitch))
+
+
+def _two_monitor_config():
+    # The tester's desk: two monitors, camera on top of the left one.
+    return dataclasses.replace(CFG, features=_ws_cfg(monitors=arc_layout(2), camera_monitor=0))
+
+
+def test_phone_held_next_to_face_in_line_with_a_monitor_is_phone_use():
+    # Live test: head turned ~30 deg to the right towards monitor 2, phone held up
+    # beside the face on that side (raw image: the user's right is the image left).
+    pipeline = FeaturePipeline(_two_monitor_config())
+    face = _real_face(yaw=-30, pitch=-3)
+    yaw, pitch = pipeline.screen_zones.monitors[1].center
+    phone_in_hand = _phone_at((80, 120, 200, 330))  # large, right next to the face
+    first = pipeline.process(0.0, FRAME, face, PoseResult(False), phone_in_hand)
+    assert first.features.phone.near_face
+    assert first.features.monitor == 1  # the head *is* in monitor 2's direction ...
+    analysis = _run(pipeline, 5.0, face, phone_in_hand, start=0.1)
+    assert analysis.features.phone.looking_at_phone  # ... but the phone is in the way
+    assert analysis.state is FocusState.DISTRACTED
+    assert analysis.reason.code is ReasonCode.PHONE
+
+
+def test_small_phone_far_away_in_line_with_a_monitor_is_ignored():
+    pipeline = FeaturePipeline(_two_monitor_config())
+    face = _real_face(yaw=-30, pitch=-3)
+    phone_on_stand = _phone_at((90, 300, 120, 330))  # small: far from the user
+    analysis = _run(pipeline, 8.0, face, phone_on_stand)
+    assert not analysis.features.phone.near_face
+    assert not analysis.features.phone.looking_at_phone
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_phone_in_hand_while_looking_at_another_monitor_is_ignored():
+    pipeline = FeaturePipeline(_two_monitor_config())
+    face = _real_face(yaw=0, pitch=0)  # looking at monitor 1 (camera monitor)
+    phone_in_hand = _phone_at((80, 300, 200, 470))
+    analysis = _run(pipeline, 8.0, face, phone_in_hand)
+    assert analysis.features.phone.near_face
+    assert not analysis.features.phone.looking_at_phone
+    assert analysis.state is FocusState.FOCUSED
+
+
+def test_phone_gaze_survives_short_yolo_dropouts():
+    # Live test: the hand covering the phone made YOLO miss it for ~2 s.
+    pipeline = FeaturePipeline(_two_monitor_config())
+    face = _real_face(yaw=-30, pitch=-3)
+    phone = _phone_at((80, 120, 200, 330))
+    analysis = None
+    for i, t in enumerate(np.arange(0.0, 6.0, 0.1)):
+        missed = 2.0 <= t < 4.0  # no detection for 2 s
+        analysis = pipeline.process(float(t), FRAME, face, PoseResult(False),
+                                    ObjectResult(person_detected=True) if missed else phone)
+    assert analysis.features.activity.seconds_looking_at_phone > 5.0
+    assert analysis.state is FocusState.DISTRACTED

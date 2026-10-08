@@ -1,7 +1,10 @@
 """Widget-level tests; they run without a display using Qt's offscreen platform."""
 
 import io
+import math
 import os
+import re
+import string
 import wave
 
 import numpy as np
@@ -9,16 +12,27 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QPointF, Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import QAbstractButton, QApplication, QLabel  # noqa: E402
 
-from app.config.settings import CameraPosition  # noqa: E402
-from app.config.user_settings import UserSettings  # noqa: E402
-from app.features.feature_pipeline import FocusState, FrameAnalysis, FrameFeatures  # noqa: E402
+from app.config.settings import MAX_MONITOR_DISTANCE, CameraEdge, Workspace, arc_layout  # noqa: E402
+from app.config.user_settings import UserSettings, load_user_settings, save_user_settings  # noqa: E402
+from app.features.feature_pipeline import (  # noqa: E402
+    FocusState,
+    FrameAnalysis,
+    FrameFeatures,
+    Reason,
+    ReasonCode,
+)
+from app.features.gaze_features import Attention  # noqa: E402
 from app.features.phone_features import PhoneFeatures  # noqa: E402
+from app.ui import i18n  # noqa: E402
 from app.ui.camera_widget import draw_overlays  # noqa: E402
-from app.ui.dashboard import Dashboard  # noqa: E402
-from app.ui.settings_dialog import SettingsDialog, SetupDialog  # noqa: E402
+from app.ui.dashboard import Dashboard, describe_reason  # noqa: E402
+from app.ui.settings_dialog import SettingsDialog, SetupDialog, parse_seconds  # noqa: E402
 from app.ui.sound import LOOP_SECONDS, SAMPLE_RATE, build_chime_wav  # noqa: E402
+from app.ui.workspace_widget import WorkspaceEditor, move_person, nearest_distance, set_distance  # noqa: E402
 from app.vision.face_detection import FaceResult  # noqa: E402
 from app.vision.head_pose import HeadPose  # noqa: E402
 from app.vision.object_detection import ObjectResult  # noqa: E402
@@ -29,6 +43,21 @@ from app.vision.pose_detection import PoseResult  # noqa: E402
 def qapp():
     return QApplication.instance() or QApplication([])
 
+
+@pytest.fixture(autouse=True)
+def english():
+    i18n.set_language("en")
+    yield
+    i18n.set_language("en")
+
+
+def _type(spin_box, text):
+    spin_box.setFocus()
+    spin_box.selectAll()
+    QTest.keyClicks(spin_box, text)
+
+
+# --- sound -------------------------------------------------------------------------
 
 def test_chime_is_a_soft_looping_wav():
     with wave.open(io.BytesIO(build_chime_wav())) as wav:
@@ -42,50 +71,236 @@ def test_chime_is_a_soft_looping_wav():
     assert np.abs(samples[-SAMPLE_RATE:]).max() < 50
 
 
-def test_setup_dialog_returns_workspace(qapp):
-    dialog = SetupDialog(UserSettings(sound_volume=12))
-    dialog._workspace._monitor_group.button(2).click()
-    dialog._workspace._select_position(CameraPosition.TOP_RIGHT)
+# --- settings: typed values are saved (regression) ------------------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("7.5", 7.5), ("7,5", 7.5), ("12", 12.0), ("12 s", 12.0), ("12s", 12.0), (" 8,0 s ", 8.0),
+    ("", None), ("abc", None), (",", None),
+])
+def test_parse_seconds(text, expected):
+    assert parse_seconds(text) == expected
+
+
+@pytest.mark.parametrize("typed,expected", [("7,5", 7.5), ("7.5", 7.5), ("12", 12.0), ("45 s", 45.0)])
+def test_typed_distraction_value_is_saved(qapp, typed, expected):
+    dialog = SettingsDialog(UserSettings())
+    dialog.show()
+    _type(dialog._distraction.spin_box, typed)
+    # Save is clicked straight away: the text in the field must be used.
+    assert dialog.result_settings().distraction_after_s == expected
+
+
+def test_typed_values_outside_the_range_are_clamped_not_dropped(qapp):
+    dialog = SettingsDialog(UserSettings())
+    dialog.show()
+    _type(dialog._no_movement.spin_box, "2")  # minimum is 5 s
+    _type(dialog._phone.spin_box, "9999")  # maximum is 600 s
     result = dialog.result_settings()
-    assert result.monitor_count == 2
-    assert result.camera_position is CameraPosition.TOP_RIGHT
+    assert result.no_movement_away_after_s == 5
+    assert result.phone_distraction_after_s == 600
+
+
+def test_step_buttons_start_from_the_typed_value(qapp):
+    dialog = SettingsDialog(UserSettings())
+    dialog.show()
+    _type(dialog._distraction.spin_box, "10")
+    dialog._distraction._step(1)
+    assert dialog.result_settings().distraction_after_s == 10.5
+
+
+def test_settings_persist_after_save_and_reopen(qapp, tmp_path):
+    path = tmp_path / "user_settings.json"
+    dialog = SettingsDialog(UserSettings())
+    dialog.show()
+    _type(dialog._distraction.spin_box, "8,5")
+    _type(dialog._phone.spin_box, "4")
+    _type(dialog._no_movement.spin_box, "150")
+    dialog._sensitivity.setValue(7)
+    dialog._sound_enabled.setChecked(False)
+    dialog._volume.setValue(65)
+    dialog._language.setCurrentIndex(dialog._language.findData("es"))
+    dialog.workspace_editor._monitor_group.button(3).click()
+    QTest.mouseClick(dialog._save, Qt.MouseButton.LeftButton)
+    assert dialog.result() == SettingsDialog.DialogCode.Accepted
+    save_user_settings(dialog.result_settings(), path)
+
+    saved = load_user_settings(path)
+    assert (saved.distraction_after_s, saved.phone_distraction_after_s, saved.no_movement_away_after_s) == (
+        8.5, 4.0, 150.0)
+    assert (saved.sensitivity, saved.sound_enabled, saved.sound_volume, saved.language) == (7, False, 65, "es")
+    assert saved.workspace.monitor_count == 3
+
+    reopened = SettingsDialog(saved)
+    reopened.show()
+    assert reopened._distraction.value() == 8.5
+    assert reopened._distraction.spin_box.text() == "8,5 s"  # Spanish decimal comma
+    assert reopened._no_movement.value() == 150
+    assert reopened._volume.value() == 65
+    assert reopened.result_settings() == saved
+
+
+def test_restore_defaults_keeps_workspace_and_language(qapp):
+    workspace = Workspace(monitors=arc_layout(2))
+    dialog = SettingsDialog(UserSettings(workspace=workspace, language="de", sensitivity=9, sound_volume=5))
+    dialog._restore_defaults()
+    result = dialog.result_settings()
+    assert result.workspace.monitor_count == 2 and result.language == "de"
+    assert result.sensitivity == 5 and result.sound_volume == 40
+
+
+# --- workspace editor ---------------------------------------------------------------
+
+def test_setup_dialog_returns_workspace_and_language(qapp):
+    dialog = SetupDialog(UserSettings(sound_volume=12))
+    editor = dialog.workspace_editor
+    editor._monitor_group.button(2).click()
+    editor._camera_monitor.setCurrentIndex(1)
+    editor._camera_edge.setCurrentIndex(editor._camera_edge.findData(CameraEdge.BOTTOM.value))
+    dialog._language.setCurrentIndex(dialog._language.findData("de"))
+    result = dialog.result_settings()
+    assert result.workspace.monitor_count == 2
+    assert result.workspace.camera_monitor == 1 and result.workspace.camera_edge is CameraEdge.BOTTOM
+    assert result.language == "de"
     assert result.sound_volume == 12  # untouched preferences are kept
 
 
-def test_reducing_monitors_resets_unavailable_camera_position(qapp):
-    dialog = SetupDialog(UserSettings(monitor_count=3, camera_position=CameraPosition.TOP_LEFT))
-    dialog._workspace._monitor_group.button(1).click()
-    assert dialog.result_settings().camera_position is CameraPosition.TOP_CENTER
+def test_distance_slider_moves_monitors_and_respects_one_metre(qapp):
+    editor = WorkspaceEditor(Workspace(monitors=arc_layout(3)))
+    editor._distance.setValue(90)
+    assert nearest_distance(editor.workspace) == pytest.approx(0.9, abs=0.01)
+    editor._distance.setValue(100)
+    for m in editor.workspace.monitors:
+        assert math.hypot(m.x, m.z) <= MAX_MONITOR_DISTANCE + 1e-6
 
 
-def test_settings_dialog_edits_all_preferences(qapp):
+def test_angle_slider_rotates_selected_monitor(qapp):
+    editor = WorkspaceEditor(Workspace(monitors=arc_layout(3)))
+    editor.plan.select(2)
+    editor._angle.setValue(-30)
+    assert editor.workspace.monitors[2].angle == -30
+    editor._arrange.click()
+    expected = arc_layout(3, nearest_distance(editor.workspace))
+    for got, want in zip(editor.workspace.monitors, expected):
+        assert (got.x, got.z, got.angle) == pytest.approx((want.x, want.z, want.angle), abs=1e-3)
+
+
+def test_dragging_the_person_keeps_monitors_within_reach(qapp):
+    ws = Workspace(monitors=arc_layout(3))
+    moved = move_person(ws, -0.9, -0.35)
+    for m in moved.monitors:
+        assert math.hypot(m.x - moved.person_x, m.z - moved.person_z) <= MAX_MONITOR_DISTANCE + 1e-3
+
+
+def test_drag_person_with_mouse(qapp):
+    editor = WorkspaceEditor(Workspace(monitors=arc_layout(1)))
+    plan = editor.plan
+    plan.resize(500, 340)
+    start = plan._to_screen(0.0, 0.0)
+    end = plan._to_screen(0.2, 0.1)
+    QTest.mousePress(plan, Qt.MouseButton.LeftButton, pos=start.toPoint())
+    QTest.mouseMove(plan, end.toPoint())
+    QTest.mouseRelease(plan, Qt.MouseButton.LeftButton, pos=end.toPoint())
+    assert editor.workspace.person_x == pytest.approx(0.2, abs=0.02)
+    assert editor.workspace.person_z == pytest.approx(0.1, abs=0.02)
+
+
+def test_set_distance_scales_layout():
+    ws = Workspace(monitors=arc_layout(2, 0.5))
+    assert nearest_distance(set_distance(ws, 0.8)) == pytest.approx(0.8, abs=1e-3)
+
+
+# --- languages --------------------------------------------------------------------
+
+def _placeholders(text):
+    return {name for _, name, _, _ in string.Formatter().parse(text) if name}
+
+
+def test_every_language_has_every_string():
+    english = i18n._STRINGS["en"]
+    for code in ("es", "de"):
+        table = i18n._STRINGS[code]
+        assert set(table) == set(english), code
+        for key, text in english.items():
+            assert _placeholders(table[key]) == _placeholders(text), (code, key)
+
+
+def test_every_enum_value_is_translated():
+    keys = set(i18n._STRINGS["en"])
+    for state in FocusState:
+        assert f"state.{state.value}" in keys
+    for attention in Attention:
+        assert f"attention.{attention.value}" in keys
+    for edge in CameraEdge:
+        assert f"ws.edge.{edge.value}" in keys
+
+
+def _visible_texts(widget):
+    texts = [w.text() for w in widget.findChildren(QLabel) + widget.findChildren(QAbstractButton)]
+    return [t for t in texts if t and not re.fullmatch(r"[\d\W_]*", t)]
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("en", ["Settings", "Save", "No movement before away", "Language"]),
+    ("es", ["Ajustes", "Guardar", "Sin movimiento antes de ausente", "Idioma"]),
+    ("de", ["Einstellungen", "Speichern", "Keine Bewegung bis abwesend", "Sprache"]),
+])
+def test_settings_dialog_in_each_language(qapp, code, expected):
+    i18n.set_language(code)
+    dialog = SettingsDialog(UserSettings(language=code))
+    texts = _visible_texts(dialog) + [dialog.windowTitle()] + [
+        box.title() for box in (dialog._detection_box, dialog._sound_box, dialog._language_box)]
+    for word in expected:
+        assert any(word in t for t in texts), (code, word)
+    if code != "en":
+        english = set(i18n._STRINGS["en"].values())
+        untranslated = [t for t in texts if t in english and t not in i18n._STRINGS[code].values()]
+        assert not untranslated, untranslated
+
+
+def test_switching_language_in_settings_retranslates_live(qapp):
     dialog = SettingsDialog(UserSettings())
-    dialog._distraction.setValue(12)
-    dialog._phone.setValue(6)
-    dialog._idle.setValue(300)
-    dialog._sensitivity.setValue(9)
-    dialog._sound_enabled.setChecked(False)
-    dialog._volume.setValue(70)
-    result = dialog.result_settings()
-    assert (result.distraction_after_s, result.phone_distraction_after_s, result.idle_after_s) == (12, 6, 300)
-    assert result.sensitivity == 9
-    assert result.sound_enabled is False and result.sound_volume == 70
+    dialog._language.setCurrentIndex(dialog._language.findData("de"))
+    assert dialog.windowTitle() == "Einstellungen"
+    assert dialog.workspace_editor._arrange.text() == "Im Halbkreis anordnen"
 
-    dialog._restore_defaults()
-    assert dialog.result_settings() == UserSettings()
 
+@pytest.mark.parametrize("code,focused,reason", [
+    ("en", "FOCUSED", "Looking at monitor 2"),
+    ("es", "CONCENTRADO", "Mirando el monitor 2"),
+    ("de", "KONZENTRIERT", "Blick auf Monitor 2"),
+])
+def test_dashboard_in_each_language(qapp, code, focused, reason):
+    i18n.set_language(code)
+    dashboard = Dashboard()
+    features = FrameFeatures(timestamp=0.0, person_detected=True, attention=Attention.ON_SCREEN, monitor=1)
+    dashboard.update_analysis(FrameAnalysis(features, FocusState.FOCUSED, Reason(ReasonCode.ON_MONITOR, monitor=1)))
+    assert dashboard._state.text() == focused
+    assert dashboard._reason.text() == reason
+    assert dashboard._monitor.text() == i18n.tr("monitor.n", n=2)
+    names = [dashboard._timer_names[s].text() for s in FocusState]
+    assert all(i18n.tr(f"state.{s.value}") in n for s, n in zip(FocusState, names))
+
+
+def test_reasons_use_language_decimal_separator():
+    i18n.set_language("de")
+    text = describe_reason(Reason(ReasonCode.LOOKING_AWAY, 6.0, attention=Attention.DOWN))
+    assert text == "Blick nach unten seit 6 s"
+
+
+# --- dashboard --------------------------------------------------------------------
 
 def test_dashboard_shows_phone_states_and_timers(qapp):
     dashboard = Dashboard()
     visible = FrameFeatures(timestamp=0.0, person_detected=True, phone=PhoneFeatures(visible=True))
-    dashboard.update_analysis(FrameAnalysis(visible, FocusState.FOCUSED, "Attention on the monitors"))
+    dashboard.update_analysis(FrameAnalysis(visible, FocusState.FOCUSED, Reason(ReasonCode.ON_MONITOR)))
     assert dashboard._phone.text() == "Visible, ignored"
     assert dashboard._state.text() == "FOCUSED"
 
     in_use = FrameFeatures(timestamp=0.0, person_detected=True,
                            phone=PhoneFeatures(visible=True, looking_at_phone=True))
-    dashboard.update_analysis(FrameAnalysis(in_use, FocusState.DISTRACTED, "Looking at phone for 4 s"))
+    dashboard.update_analysis(FrameAnalysis(in_use, FocusState.DISTRACTED, Reason(ReasonCode.PHONE, 4.0)))
     assert dashboard._phone.text() == "Looking at it"
+    assert dashboard._reason.text() == "Looking at the phone for 4 s"
 
     dashboard.update_analysis(FrameAnalysis(in_use, FocusState.DISTRACTED), FocusState.BREAK)
     assert dashboard._state.text() == "BREAK"
@@ -94,6 +309,7 @@ def test_dashboard_shows_phone_states_and_timers(qapp):
     assert dashboard._timer_values[FocusState.FOCUSED].text() == "42:31"
     assert dashboard._timer_values[FocusState.BREAK].text() == "05:10"
     assert dashboard._timer_values[FocusState.AWAY].text() == "00:00"
+    assert len(dashboard._timer_values) == 4  # no IDLE
 
     dashboard.set_timers_visible(False)
     assert dashboard._timers_card.isHidden()

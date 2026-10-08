@@ -12,7 +12,6 @@ ACCENT = "#4c8dff"
 STATE_COLORS = {
     "FOCUSED": "#2ecc71",
     "DISTRACTED": "#f39c12",
-    "IDLE": "#3498db",
     "AWAY": "#7f8c8d",
     "BREAK": "#a37cf0",
 }

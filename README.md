@@ -14,8 +14,9 @@ It is not a psychological or medical assessment.
 | Head yaw / pitch / roll | Facial transformation matrix from MediaPipe |
 | Posture (Upright / Leaning / Slouching) | Shoulder and nose landmarks from MediaPipe Pose |
 | Cell phone | Ultralytics YOLO (COCO class `cell phone`) |
-| Looking at the phone | Head direction compared with the phone's position in the frame |
-| State | Rule-based: `FOCUSED`, `DISTRACTED`, `IDLE`, `AWAY`, plus a manual `BREAK` |
+| Looking at the phone | Head direction compared with the phone's bounding box in the frame |
+| Monitor being looked at | Head pose vs. the configured 3D monitor layout |
+| State | Rule-based: `FOCUSED`, `DISTRACTED`, `AWAY`, plus a manual `BREAK` |
 
 ## Pipeline
 
@@ -32,35 +33,65 @@ Webcam → YOLO (cell phone, person)
 
 Capture and inference run in a `QThread`, so the interface never blocks on the camera.
 
-## Workspace setup
+## Workspace setup (3D)
 
-At startup a setup window asks for the number of monitors (1–3) and where the camera sits
-(top center, top of the left/right monitor, left side, right side, below center).
-From this the app computes the range of head yaw/pitch that means "looking at a monitor":
-for example, with the camera on the left side, working means looking to the camera's right.
-Both values can be changed later under **⚙ Settings** and are saved to
-`%APPDATA%\FocusDeskAI\user_settings.json`.
+At startup a setup window shows a **top view of your desk**: you, up to three monitors, and
+the webcam. You can
+
+- choose 1, 2 or 3 monitors (arranged by default side by side on a semicircle facing you),
+- drag yourself or any monitor (every monitor stays within **0.3–1 m** of you),
+- rotate a monitor with its round handle, the mouse wheel or the angle slider
+  (double-click a monitor to turn it towards you),
+- set the distance to the nearest monitor with a slider,
+- pick the monitor and edge (top, bottom, left, right) the webcam is mounted on.
+
+Each monitor rectangle is projected to the head yaw/pitch needed to look at it from your
+seat, relative to the camera. The shaded wedges in the plan show these "allowed" directions.
+Looking at **any** configured monitor is focus; only looking clearly outside all of them
+(plus a sensitivity-dependent tolerance) for the configured time counts as distraction.
+
+Head angles are expressed relative to the line towards the camera (MediaPipe measures them
+relative to the lens axis), and a slow, outlier-protected **automatic pitch calibration**
+removes the user's vertical head-pose bias (shown under *Head → Pitch calibration*).
+If a monitor lies so far to the side that the face leaves the camera's view, the app keeps
+crediting that monitor while the face is out of view after a large turn towards it.
+
+Everything is editable later under **⚙ Settings** and saved to
+`%APPDATA%\FocusDeskAI\user_settings.json` (older settings files are migrated).
 
 ## State rules
+
+States: `FOCUSED`, `DISTRACTED`, `AWAY`, and the manual `BREAK`.
 
 Rules are evaluated in priority order. Nothing is decided from a single frame: every rule
 needs a behaviour to last, head angles are smoothed, short interruptions (< 1 s) pause a
 behaviour timer instead of resetting it, and a new state is shown only after it has
 persisted for 1 s.
 
-1. **AWAY** – no person detected for 3 s.
-2. **DISTRACTED (phone)** – a phone is visible **and** the head is turned away from the monitors
-   towards it, for the phone duration (default 3 s). A phone on the desk while you look at a
-   monitor stays `FOCUSED`.
-3. **DISTRACTED** – head turned outside the monitor zone (left/right/up/down, strong head roll),
-   or the face is hidden while the body is visible, for the distraction duration (default 5 s).
-4. **IDLE** – present but almost motionless for the idle duration (default 60 s).
-5. **FOCUSED** – otherwise.
+1. **AWAY** – nobody detected for 3 s, or no movement at all for the
+   *No movement before away* time (default 60 s; catches an empty chair or a coat that the
+   detectors mistake for a person).
+2. **DISTRACTED (phone)** – a phone is visible **and** the head points towards the phone's
+   bounding box, for the phone duration (default 3 s). A phone on the desk while you look at
+   a monitor stays `FOCUSED`; a phone held up close to your face in your line of sight counts
+   even when a monitor is behind it.
+3. **DISTRACTED** – looking outside every monitor (left/right/up/down/between monitors,
+   strong head roll), or the face is hidden while the body is visible, for the distraction
+   duration (default 5 s).
+4. **FOCUSED** – otherwise.
 
 **BREAK** is set with the ☕ Break button and pauses distraction detection until you resume.
 
-Durations, detection sensitivity (width of the monitor zone and phone-gaze tolerance), and the
-distraction sound (on/off, volume) are all editable in **⚙ Settings**.
+## Settings
+
+| Section | Options |
+| --- | --- |
+| Workspace | monitors, positions, angles, distance, camera mount |
+| Detection | looking away before distracted, looking at phone before distracted, no movement before away, sensitivity |
+| Sound | on/off, volume, test |
+| Language | English, Español, Deutsch – applies to the whole application and is remembered |
+
+Typed values accept both `7.5` and `7,5`; out-of-range values are clamped, never dropped.
 
 ## Controls
 
@@ -69,7 +100,7 @@ distraction sound (on/off, volume) are all editable in **⚙ Settings**.
 | ☕ Break / ▶ Resume | Enter or leave the `BREAK` state |
 | ↺ New session | Reset the per-state session timers |
 | ⏱ Show/Hide timers | Toggle the time spent in each state |
-| ⚙ Settings | Workspace, durations, sensitivity, sound |
+| ⚙ Settings | Workspace, detection, sound, language |
 
 While `DISTRACTED`, a soft chime repeats every 3 s and stops as soon as the state changes.
 

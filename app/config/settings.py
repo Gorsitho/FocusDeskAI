@@ -6,6 +6,7 @@ UI live in `app.config.user_settings` and are folded into these dataclasses
 with `apply_user_settings`.
 """
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -13,34 +14,70 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_DIR = PROJECT_ROOT / "models"
 
+# Workspace limits, in metres.
+MAX_MONITOR_DISTANCE = 1.0
+MIN_MONITOR_DISTANCE = 0.3
+MAX_MONITORS = 3
+DEFAULT_MONITOR_DISTANCE = 0.65
+DEFAULT_MONITOR_WIDTH = 0.53  # a 24" 16:9 monitor
+DEFAULT_MONITOR_HEIGHT = 0.30
 
-class CameraPosition(str, Enum):
-    """Where the webcam sits relative to the monitors, as seen by the user."""
 
-    TOP_CENTER = "top_center"
-    TOP_LEFT = "top_left"
-    TOP_RIGHT = "top_right"
+class CameraEdge(str, Enum):
+    """Edge of the chosen monitor the webcam is mounted on."""
+
+    TOP = "top"
+    BOTTOM = "bottom"
     LEFT = "left"
     RIGHT = "right"
-    BOTTOM_CENTER = "bottom_center"
+
+
+@dataclass(frozen=True)
+class MonitorPlacement:
+    """A monitor in the top-down workspace plan.
+
+    Coordinates are metres: x to the user's right, z forward (away from the user).
+    `angle` is the rotation around the vertical axis in degrees, clockwise seen
+    from above; 0 means the screen faces straight back along -z.
+    """
+
+    x: float
+    z: float
+    angle: float = 0.0
+    width: float = DEFAULT_MONITOR_WIDTH
+    height: float = DEFAULT_MONITOR_HEIGHT
+
+
+@dataclass(frozen=True)
+class Workspace:
+    """Approximate 3D desk layout: where the user sits and where the monitors are."""
+
+    person_x: float = 0.0
+    person_z: float = 0.0
+    monitors: tuple[MonitorPlacement, ...] = (MonitorPlacement(0.0, DEFAULT_MONITOR_DISTANCE),)
+    camera_monitor: int = 0
+    camera_edge: CameraEdge = CameraEdge.TOP
 
     @property
-    def label(self) -> str:
-        return _CAMERA_POSITION_LABELS[self]
-
-    def available_for(self, monitor_count: int) -> bool:
-        # With a single monitor "above the left/right monitor" is the same as top center.
-        return monitor_count > 1 or self not in (CameraPosition.TOP_LEFT, CameraPosition.TOP_RIGHT)
+    def monitor_count(self) -> int:
+        return len(self.monitors)
 
 
-_CAMERA_POSITION_LABELS = {
-    CameraPosition.TOP_CENTER: "Top center",
-    CameraPosition.TOP_LEFT: "Top of left monitor",
-    CameraPosition.TOP_RIGHT: "Top of right monitor",
-    CameraPosition.LEFT: "Left side",
-    CameraPosition.RIGHT: "Right side",
-    CameraPosition.BOTTOM_CENTER: "Below center",
-}
+def arc_layout(count: int, distance: float = DEFAULT_MONITOR_DISTANCE,
+               person: tuple[float, float] = (0.0, 0.0)) -> tuple[MonitorPlacement, ...]:
+    """Monitors side by side on a semicircle around the person, each facing them."""
+    count = max(1, min(MAX_MONITORS, count))
+    distance = max(MIN_MONITOR_DISTANCE, min(MAX_MONITOR_DISTANCE, distance))
+    # Angular step so that neighbouring screens just touch (plus a small bezel gap).
+    step = math.degrees(2 * math.atan((DEFAULT_MONITOR_WIDTH / 2 + 0.015) / distance))
+    monitors = []
+    for i in range(count):
+        angle = (i - (count - 1) / 2.0) * step
+        rad = math.radians(angle)
+        monitors.append(MonitorPlacement(
+            x=person[0] + distance * math.sin(rad), z=person[1] + distance * math.cos(rad), angle=angle,
+        ))
+    return tuple(monitors)
 
 
 @dataclass(frozen=True)
@@ -82,25 +119,41 @@ class DetectionSettings:
 
 @dataclass(frozen=True)
 class FeatureSettings:
-    # Workspace layout; together these define the head angles that count as "on screen".
-    monitor_count: int = 1
-    camera_position: CameraPosition = CameraPosition.TOP_CENTER
-    # Head rotation (degrees) needed to sweep across one monitor. The eyes do part
-    # of the work, so this is smaller than the monitor's true visual angle.
-    monitor_yaw_span: float = 30.0
-    monitor_pitch_span: float = 15.0
-    # Gap between the outer monitor edge and a camera mounted at the side.
-    side_camera_offset: float = 5.0
-    # Tolerance added around the monitors; derived from the sensitivity setting.
+    workspace: Workspace = field(default_factory=Workspace)
+    # Vertical position of the monitor centres relative to the user's eyes (metres).
+    monitor_center_height: float = -0.12
+    # Fraction of a gaze shift performed by turning the head; the eyes do the rest.
+    head_yaw_ratio: float = 0.7
+    head_pitch_ratio: float = 0.5
+    # Tolerance (degrees) added around every monitor; derived from the sensitivity setting.
     attention_margin: float = 14.0
+    # Beyond this head yaw the face landmarker usually loses the face.
+    face_tracking_limit: float = 45.0
+    # Vertical field of view MediaPipe's face geometry assumes; used to express the
+    # head pose relative to the line towards the camera rather than its optical axis.
+    camera_vertical_fov: float = 63.0
+    # Automatic pitch calibration: learns the user's head-pitch bias while they look
+    # at the monitors. Samples further than `calibration_max_error` from the expected
+    # pitch are ignored, and the learned offset is capped.
+    calibration_window_s: float = 120.0
+    calibration_min_samples: int = 20
+    calibration_sample_every_s: float = 0.5
+    calibration_max_error: float = 20.0
+    calibration_max_offset: float = 15.0
     # Head roll beyond this (e.g. resting the head on a hand) counts as off-screen.
     max_head_roll: float = 35.0
-    # Extra tolerance on top of the screen zone for a turned torso (pose only).
+    # Extra tolerance on top of the monitor zones for a turned torso (pose only).
     torso_margin: float = 35.0
     # Max angle between head direction and phone direction to count as looking at it.
     phone_gaze_max_angle: float = 45.0
+    # The head must be turned at least this far (degrees) for its direction to be trusted.
+    phone_gaze_min_turn: float = 8.0
+    # "Held up near the face": phone box at least this size and its centre within this
+    # distance of the face centre, both relative to the face height in the image.
+    phone_near_min_size: float = 0.6
+    phone_near_max_distance: float = 1.8
     # A phone stays "visible" this long after YOLO last saw it (YOLO misses frames).
-    phone_hold_s: float = 1.0
+    phone_hold_s: float = 2.5
     # Time constant of the exponential smoothing applied to yaw/pitch/roll.
     head_smoothing_s: float = 0.25
     # A behaviour timer survives interruptions shorter than this.
@@ -115,13 +168,16 @@ class FeatureSettings:
 
 @dataclass(frozen=True)
 class StateSettings:
+    # Nobody visible for this long -> AWAY.
     away_after_s: float = 3.0
+    # Someone "visible" but without any movement for this long -> AWAY (an empty
+    # chair, a coat or a photo that the detectors mistake for a person).
+    still_away_after_s: float = 60.0
     # Continuous time looking away from the monitors before DISTRACTED.
     look_away_after_s: float = 5.0
     # Continuous time looking at a visible phone before DISTRACTED.
     phone_after_s: float = 3.0
-    still_idle_after_s: float = 60.0
-    # Mean normalised landmark displacement per second below which the user is "still".
+    # Mean normalised landmark displacement per second below which nothing moves.
     still_motion_threshold: float = 0.01
     # A candidate state must persist this long before it is displayed (prevents flicker).
     min_state_duration_s: float = 1.0
