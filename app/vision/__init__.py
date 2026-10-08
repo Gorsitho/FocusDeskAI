@@ -13,7 +13,13 @@ def ensure_model(path: Path, url: str) -> Path:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".part")
-    logger.info("Downloading %s ...", path.name)
-    urllib.request.urlretrieve(url, tmp_path)
-    tmp_path.replace(path)
+    logger.info("Downloading %s to %s ...", path.name, path.parent)
+    try:
+        urllib.request.urlretrieve(url, tmp_path)
+        tmp_path.replace(path)
+    except Exception:
+        logger.exception("Download of %s failed", path.name)
+        tmp_path.unlink(missing_ok=True)
+        raise
+    logger.info("Downloaded %s (%d bytes)", path.name, path.stat().st_size)
     return path

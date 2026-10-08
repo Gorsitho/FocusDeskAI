@@ -1,5 +1,6 @@
 """Face landmark detection with the MediaPipe Face Landmarker task."""
 
+import logging
 from dataclasses import dataclass
 
 import cv2
@@ -9,6 +10,8 @@ from mediapipe.tasks.python import BaseOptions, vision
 
 from app.config.settings import DetectionSettings, ModelSettings
 from app.vision import ensure_model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,6 +35,7 @@ class FaceDetector:
             output_facial_transformation_matrixes=True,
         )
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
+        logger.info("Face landmarker ready (%s)", model_path)
 
     def detect(self, frame_bgr: np.ndarray, timestamp_ms: int) -> FaceResult:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)

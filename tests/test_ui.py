@@ -325,3 +325,52 @@ def test_overlay_draws_head_direction():
     # Yaw towards the user's left is drawn towards the image right of the nose.
     right, left = out[:, 330:].sum(), out[:, :310].sum()
     assert right > left
+
+
+# --- detection landmarks setting -------------------------------------------------------
+
+def test_landmarks_are_off_by_default_and_persist(tmp_path):
+    assert UserSettings().show_landmarks is False
+    path = tmp_path / "user_settings.json"
+    save_user_settings(UserSettings(show_landmarks=True), path)
+    assert load_user_settings(path).show_landmarks is True
+
+
+@pytest.mark.parametrize("code,label", [
+    ("en", "Show detection landmarks"), ("es", "Mostrar puntos de detección"), ("de", "Erkennungspunkte anzeigen"),
+])
+def test_landmark_checkbox_label_and_value(qapp, code, label):
+    i18n.set_language(code)
+    dialog = SettingsDialog(UserSettings(language=code))
+    assert dialog._show_landmarks.text() == label
+    assert dialog._show_landmarks.isChecked() is False
+    dialog._show_landmarks.setChecked(True)
+    assert dialog.result_settings().show_landmarks is True
+
+
+def test_preview_hides_landmarks_when_disabled():
+    from app.ui.main_window import compose_preview
+
+    frame = np.full((480, 640, 3), 40, dtype=np.uint8)
+    frame[:, :320] = 90  # asymmetric, so mirroring is visible
+    landmarks = np.full((478, 3), 0.5, np.float32)
+    landmarks[::2, :2] = 0.3
+    face = FaceResult(True, landmarks=landmarks, transform=np.eye(4))
+    features = FrameFeatures(timestamp=0.0, head_pose=HeadPose(30, 0, 0))
+    analysis = FrameAnalysis(features, FocusState.FOCUSED)
+
+    hidden = compose_preview(frame, face, PoseResult(False), ObjectResult(), 0.5, analysis, False)
+    assert np.array_equal(hidden, frame[:, ::-1])  # just the mirrored camera image
+    shown = compose_preview(frame, face, PoseResult(False), ObjectResult(), 0.5, analysis, True)
+    assert not np.array_equal(shown, frame[:, ::-1])
+
+
+def test_main_window_applies_landmark_setting_to_worker(qapp, monkeypatch):
+    from app.ui import main_window
+
+    monkeypatch.setattr(main_window.AnalysisWorker, "start", lambda self: None)
+    window = main_window.MainWindow(user_settings=UserSettings())
+    assert window._worker.show_landmarks is False
+    window.apply_user_settings(UserSettings(show_landmarks=True))
+    assert window._worker.show_landmarks is True
+    window.close()

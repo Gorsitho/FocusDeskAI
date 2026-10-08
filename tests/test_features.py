@@ -733,3 +733,105 @@ def test_phone_gaze_survives_short_yolo_dropouts():
                                     ObjectResult(person_detected=True) if missed else phone)
     assert analysis.features.activity.seconds_looking_at_phone > 5.0
     assert analysis.state is FocusState.DISTRACTED
+
+
+# --- nose / head direction ------------------------------------------------------------
+
+from app.features.phone_features import nose_forward, nose_ray_hits_box  # noqa: E402
+
+
+def test_nose_forward_follows_head_pose():
+    # Raw image: yaw > 0 (user's left) points to +x, pitch > 0 (up) to -y.
+    assert nose_forward(HeadPose(0, 0, 0)) == pytest.approx((0.0, 0.0))
+    x, y = nose_forward(HeadPose(30, 0, 0))
+    assert x == pytest.approx(0.5) and y == pytest.approx(0.0)
+    x, y = nose_forward(HeadPose(0, -30, 0))
+    assert x == pytest.approx(0.0) and y == pytest.approx(0.5)
+    x, y = nose_forward(HeadPose(-20, 20, 5))
+    assert x < 0 and y < 0
+
+
+def test_nose_ray_hits_a_box_in_its_direction_only():
+    nose = (320.0, 200.0)
+    box_below = (280, 380, 360, 470)
+    assert nose_ray_hits_box(nose, HeadPose(0, -35, 0), box_below, CFG.features)
+    assert not nose_ray_hits_box(nose, HeadPose(0, 35, 0), box_below, CFG.features)  # looking up
+    assert not nose_ray_hits_box(nose, HeadPose(40, 0, 0), box_below, CFG.features)  # looking sideways
+    # Straight into the camera: the nose direction is undefined.
+    assert not nose_ray_hits_box(nose, HeadPose(1, -1, 0), box_below, CFG.features)
+
+
+def test_ray_catches_a_large_close_phone_at_a_wide_angle():
+    # Big phone held low and to the side: its centre is ~50 deg off the nose direction,
+    # but the nose ray still passes through the box.
+    nose = (320.0, 200.0)
+    head = HeadPose(10, -30, 0)
+    box = (60, 300, 360, 470)
+    angle = _phone_angle(nose, head, box)
+    assert angle > CFG.features.phone_gaze_max_angle
+    assert nose_ray_hits_box(nose, head, box, CFG.features)
+    zones = compute_screen_zones(CFG.features)
+    center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    assert is_looking_at_phone(center, head, nose, zones, PoseFeatures(), CFG.features, box=box)
+
+
+def _phone_angle(nose, head, box):
+    from app.features.phone_features import phone_gaze_angle
+    center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    return phone_gaze_angle(center, head, nose, CFG.features)
+
+
+def test_scenario_looking_at_monitor_with_phone_visible_stays_focused():
+    pipeline = FeaturePipeline(_two_monitor_config())
+    phone_on_desk = _phone_at((420, 400, 480, 440))
+    for monitor in range(2):
+        yaw, pitch = pipeline.screen_zones.monitors[monitor].center
+        analysis = _run(pipeline, 10.0 * (monitor + 1), _real_face(yaw=yaw, pitch=pitch, center=(0.5, 0.5)),
+                        phone_on_desk, start=10.0 * monitor)
+        assert analysis.features.phone.visible
+        assert not analysis.features.phone.looking_at_phone
+        assert analysis.state is FocusState.FOCUSED
+
+
+def test_scenario_looking_at_phone_becomes_distracted():
+    pipeline = FeaturePipeline(CFG)
+    head_down = _real_face(pitch=-45, center=(0.5, 0.35))
+    phone_in_lap = _phone_at((270, 380, 370, 470))
+    early = _run(pipeline, 2.0, head_down, phone_in_lap)
+    assert early.features.phone.looking_at_phone and early.state is FocusState.FOCUSED
+    late = _run(pipeline, 5.0, head_down, phone_in_lap, start=2.0)
+    assert late.state is FocusState.DISTRACTED and late.reason.code is ReasonCode.PHONE
+
+
+def test_scenario_brief_face_loss_while_looking_at_phone():
+    # MediaPipe often drops the face for a few frames when the head is bowed over a phone.
+    pipeline = FeaturePipeline(CFG)
+    head_down = _real_face(pitch=-45, center=(0.5, 0.35))
+    phone = _phone_at((270, 380, 370, 470))
+    before = _run(pipeline, 4.5, head_down, phone)
+    assert before.state is FocusState.DISTRACTED
+    during = _run(pipeline, 5.3, FaceResult(False), phone, start=4.5)  # 0.8 s without a face
+    assert during.features.phone.looking_at_phone
+    assert during.state is FocusState.DISTRACTED
+    after = _run(pipeline, 6.0, head_down, phone, start=5.3)
+    assert after.features.activity.seconds_looking_at_phone > before.features.activity.seconds_looking_at_phone
+    assert after.state is FocusState.DISTRACTED
+
+
+def test_scenario_long_face_loss_does_not_keep_phone_use_forever():
+    pipeline = FeaturePipeline(CFG)
+    phone = _phone_at((270, 380, 370, 470))
+    _run(pipeline, 4.5, _real_face(pitch=-45, center=(0.5, 0.35)), phone)
+    analysis = _run(pipeline, 8.0, FaceResult(False), phone, start=4.5)
+    assert not analysis.features.phone.looking_at_phone
+
+
+def test_phone_visible_alone_never_causes_phone_distraction():
+    pipeline = FeaturePipeline(CFG)
+    phone = _phone_at((420, 380, 500, 470))
+    reasons = set()
+    for t in np.arange(0.0, 30.0, 0.1):
+        analysis = pipeline.process(float(t), FRAME, _real_face(center=(0.5, 0.5)), PoseResult(False), phone)
+        reasons.add(analysis.reason.code)
+    assert analysis.state is FocusState.FOCUSED
+    assert ReasonCode.PHONE not in reasons

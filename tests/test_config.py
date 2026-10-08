@@ -126,3 +126,11 @@ def test_arc_layout_respects_distance_limits(count):
     for distance in (0.1, 0.65, 3.0):
         for m in arc_layout(count, distance):
             assert 0.3 - 1e-9 <= math.hypot(m.x, m.z) <= MAX_MONITOR_DISTANCE + 1e-9
+
+
+def test_settings_file_with_byte_order_mark_is_read(tmp_path):
+    # Notepad and PowerShell can save JSON with a UTF-8 BOM; it must not reset the settings.
+    path = tmp_path / "user_settings.json"
+    path.write_text('{"sound_volume": 33, "language": "es"}', encoding="utf-8-sig")
+    user = load_user_settings(path)
+    assert user.sound_volume == 33 and user.language == "es"

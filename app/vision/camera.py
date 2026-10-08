@@ -1,5 +1,6 @@
 """Thin wrapper around cv2.VideoCapture."""
 
+import logging
 import sys
 
 import cv2
@@ -7,11 +8,14 @@ import numpy as np
 
 from app.config.settings import CameraSettings
 
+logger = logging.getLogger(__name__)
+
 
 class Camera:
     def __init__(self, config: CameraSettings):
         self._config = config
         self._capture: cv2.VideoCapture | None = None
+        self._failed_opens = 0
 
     @property
     def is_open(self) -> bool:
@@ -24,6 +28,10 @@ class Camera:
         capture = cv2.VideoCapture(self._config.index, backend)
         if not capture.isOpened():
             capture.release()
+            self._failed_opens += 1
+            # Log the first failure and then occasionally, not every retry.
+            if self._failed_opens in (1, 10) or self._failed_opens % 100 == 0:
+                logger.warning("Camera %d could not be opened (attempt %d)", self._config.index, self._failed_opens)
             return False
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._config.width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._config.height)
@@ -31,6 +39,10 @@ class Camera:
         # Keep only the latest frame so slow processing does not accumulate lag.
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._capture = capture
+        logger.info("Camera %d opened (%dx%d) after %d failed attempt(s)", self._config.index,
+                    int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                    self._failed_opens)
+        self._failed_opens = 0
         return True
 
     def read(self) -> np.ndarray | None:
@@ -44,3 +56,4 @@ class Camera:
         if self._capture is not None:
             self._capture.release()
             self._capture = None
+            logger.info("Camera %d released", self._config.index)

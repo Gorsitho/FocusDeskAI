@@ -113,6 +113,30 @@ QPushButton#Primary:hover {{
 QPushButton#Segment {{
     padding: 6px 12px;
 }}
+QPushButton#StartButton {{
+    background-color: {POSITIVE};
+    border: none;
+    border-radius: 10px;
+    color: #0b1f12;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    min-height: 54px;
+}}
+QPushButton#StartButton:hover {{
+    background-color: #4fe08c;
+}}
+QPushButton#StartButton[running="true"] {{
+    background-color: {NEGATIVE};
+    color: #ffffff;
+}}
+QPushButton#StartButton[running="true"]:hover {{
+    background-color: #f06a5d;
+}}
+QLabel#SessionLabel {{
+    color: {TEXT_MUTED};
+    font-size: 12px;
+}}
 QPushButton#StepButton {{
     padding: 0;
     min-width: 28px;

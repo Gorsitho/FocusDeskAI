@@ -1,5 +1,6 @@
 """Combines per-frame detections into features and a rule-based focus state."""
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -160,6 +161,7 @@ class FeaturePipeline:
         self._out_of_view_monitor: int | None = None
         self._last_monitor: int | None = None
         self._last_yaw = 0.0
+        self._last_phone_gaze = -math.inf
         self._calibrator = PitchCalibrator(config.features)
         self.reconfigure(config)
 
@@ -206,8 +208,16 @@ class FeaturePipeline:
             self._phone.box, face.landmarks if face.detected else None, frame_size, cfg.features
         )
         looking_at_phone = person and is_looking_at_phone(
-            phone_center, head_pose, anchor, self._zones, pose_features, cfg.features, phone_direction, near_face
+            phone_center, head_pose, anchor, self._zones, pose_features, cfg.features, phone_direction, near_face,
+            self._phone.box,
         )
+        if looking_at_phone and head_pose is not None:
+            self._last_phone_gaze = timestamp
+        elif (person and head_pose is None and phone_center is not None
+              and timestamp - self._last_phone_gaze <= cfg.features.phone_gaze_hold_s):
+            # MediaPipe briefly lost the face (common when looking down at a phone):
+            # keep the decision instead of restarting the phone timer.
+            looking_at_phone = True
         gaze_angle = (
             phone_gaze_angle(phone_center, phone_direction, anchor, cfg.features)
             if phone_center is not None and phone_direction is not None and anchor is not None else None

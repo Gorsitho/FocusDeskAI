@@ -86,23 +86,62 @@ def face_anchor(face_landmarks: np.ndarray | None, frame_size: tuple[int, int]) 
     return float(x * width), float(y * height)
 
 
+def nose_forward(head_pose: HeadPose) -> tuple[float, float]:
+    """Where the nose points, projected onto the raw (non-mirrored) image.
+
+    This is the face's forward axis from the head pose: yaw > 0 (towards the
+    user's left) points to +x and pitch > 0 (up) to -y. The length is the sine of
+    the angle between the nose and the camera axis, so a face looking straight at
+    the camera has (almost) no direction.
+    """
+    yaw, pitch = math.radians(head_pose.yaw), math.radians(head_pose.pitch)
+    return math.sin(yaw) * math.cos(pitch), -math.sin(pitch)
+
+
 def phone_gaze_angle(
     phone_center: tuple[float, float], head_pose: HeadPose, anchor: tuple[float, float], cfg: FeatureSettings
 ) -> float | None:
-    """Angle between where the head points and where the phone is, in the image plane.
+    """Angle between the nose's forward direction and the nose-to-phone direction.
 
-    Head pose is relative to the camera, as is the image, so both directions live
-    in the same frame: yaw > 0 (user's left) points to +x of the raw image and
-    pitch > 0 (up) points to -y. Returns None when the head is too close to
-    "looking at the camera" for its direction to mean anything.
+    `anchor` is the nose tip landmark. Returns None when the head is too close to
+    "looking into the camera" for its direction to mean anything.
     """
-    head_x, head_y = head_pose.yaw, -head_pose.pitch
-    if math.hypot(head_x, head_y) < cfg.phone_gaze_min_turn:
+    forward = nose_forward(head_pose)
+    if math.hypot(*forward) < math.sin(math.radians(cfg.phone_gaze_min_turn)):
         return None
     phone_x, phone_y = phone_center[0] - anchor[0], phone_center[1] - anchor[1]
     if math.hypot(phone_x, phone_y) < 1e-6:
         return 0.0  # phone held right in front of the face
-    return _angle_between((head_x, head_y), (phone_x, phone_y))
+    return _angle_between(forward, (phone_x, phone_y))
+
+
+def nose_ray_hits_box(
+    anchor: tuple[float, float], head_pose: HeadPose, box: tuple[int, int, int, int], cfg: FeatureSettings,
+    padding: float = 0.15,
+) -> bool:
+    """Does the ray from the nose tip along the nose direction cross the phone box?
+
+    Complements the angle test for large, close phones: the ray can pass through
+    the box even when the box centre is at a wider angle.
+    """
+    dx, dy = nose_forward(head_pose)
+    if math.hypot(dx, dy) < math.sin(math.radians(cfg.phone_gaze_min_turn)):
+        return False
+    x1, y1, x2, y2 = box
+    pad_x, pad_y = (x2 - x1) * padding, (y2 - y1) * padding
+    x1, x2, y1, y2 = x1 - pad_x, x2 + pad_x, y1 - pad_y, y2 + pad_y
+    # Slab test for a ray starting at the nose (t >= 0).
+    t_min, t_max = 0.0, math.inf
+    for origin, direction, low, high in ((anchor[0], dx, x1, x2), (anchor[1], dy, y1, y2)):
+        if abs(direction) < 1e-9:
+            if not low <= origin <= high:
+                return False
+            continue
+        t1, t2 = (low - origin) / direction, (high - origin) / direction
+        t_min, t_max = max(t_min, min(t1, t2)), min(t_max, max(t1, t2))
+        if t_min > t_max:
+            return False
+    return True
 
 
 def is_looking_at_phone(
@@ -114,9 +153,14 @@ def is_looking_at_phone(
     cfg: FeatureSettings,
     direction: HeadPose | None = None,
     near_face: bool = False,
+    box: tuple[int, int, int, int] | None = None,
 ) -> bool:
-    """`head_pose` decides whether a monitor is being looked at; `direction` (defaults to
-    it) is the head direction compared with the phone's position in the image."""
+    """A visible phone counts only when the nose/head points towards it.
+
+    `head_pose` decides whether a monitor is being looked at; `direction` (defaults
+    to it) is the head direction compared with the phone's position in the image,
+    starting at the nose tip `anchor`.
+    """
     if phone_center is None:
         return False
 
@@ -132,8 +176,11 @@ def is_looking_at_phone(
     if on_monitor and not near_face:
         return False
 
-    angle = phone_gaze_angle(phone_center, direction or head_pose, anchor, cfg)
-    return angle is not None and angle <= cfg.phone_gaze_max_angle
+    nose_direction = direction or head_pose
+    angle = phone_gaze_angle(phone_center, nose_direction, anchor, cfg)
+    if angle is not None and angle <= cfg.phone_gaze_max_angle:
+        return True
+    return box is not None and nose_ray_hits_box(anchor, nose_direction, box, cfg)
 
 
 def _angle_between(a: tuple[float, float], b: tuple[float, float]) -> float:

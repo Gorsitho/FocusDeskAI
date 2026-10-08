@@ -40,10 +40,13 @@ class ObjectDetector:
             from ultralytics import YOLO
 
             models.yolo_weights_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info("Loading YOLO weights from %s (exists=%s)",
+                        models.yolo_weights_path, models.yolo_weights_path.exists())
             self._model = YOLO(str(models.yolo_weights_path))
+            logger.info("YOLO ready: phone and person detection enabled")
         except Exception as exc:  # noqa: BLE001 - any failure just disables this detector
             self.error = f"{type(exc).__name__}: {exc}"
-            logger.warning("Object detection disabled: %s", self.error)
+            logger.exception("Object detection disabled: %s", self.error)
 
     @property
     def available(self) -> bool:

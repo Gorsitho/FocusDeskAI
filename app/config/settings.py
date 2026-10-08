@@ -11,8 +11,23 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from app.config import paths
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# In a PyInstaller build PROJECT_ROOT is the bundle's _internal folder.
 MODELS_DIR = PROJECT_ROOT / "models"
+
+
+def model_path(name: str) -> Path:
+    """Bundled model if present; otherwise where it may be downloaded to.
+
+    A frozen build's install folder can be read-only, so missing models are
+    downloaded to the per-user data folder instead.
+    """
+    bundled = MODELS_DIR / name
+    if bundled.exists() or not paths.is_frozen():
+        return bundled
+    return paths.user_models_dir() / name
 
 # Workspace limits, in metres.
 MAX_MONITOR_DISTANCE = 1.0
@@ -91,18 +106,18 @@ class CameraSettings:
 
 @dataclass(frozen=True)
 class ModelSettings:
-    face_landmarker_path: Path = MODELS_DIR / "face_landmarker.task"
+    face_landmarker_path: Path = field(default_factory=lambda: model_path("face_landmarker.task"))
     face_landmarker_url: str = (
         "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
         "face_landmarker/float16/latest/face_landmarker.task"
     )
-    pose_landmarker_path: Path = MODELS_DIR / "pose_landmarker_lite.task"
+    pose_landmarker_path: Path = field(default_factory=lambda: model_path("pose_landmarker_lite.task"))
     pose_landmarker_url: str = (
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
         "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
     )
     # Ultralytics downloads the weights automatically on first use.
-    yolo_weights_path: Path = MODELS_DIR / "yolo11n.pt"
+    yolo_weights_path: Path = field(default_factory=lambda: model_path("yolo11n.pt"))
 
 
 @dataclass(frozen=True)
@@ -152,6 +167,8 @@ class FeatureSettings:
     # distance of the face centre, both relative to the face height in the image.
     phone_near_min_size: float = 0.6
     phone_near_max_distance: float = 1.8
+    # Keep "looking at the phone" this long when the face is briefly lost.
+    phone_gaze_hold_s: float = 1.0
     # A phone stays "visible" this long after YOLO last saw it (YOLO misses frames).
     phone_hold_s: float = 2.5
     # Time constant of the exponential smoothing applied to yaw/pitch/roll.

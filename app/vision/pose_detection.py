@@ -1,5 +1,6 @@
 """Body pose detection with the MediaPipe Pose Landmarker task."""
 
+import logging
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -10,6 +11,8 @@ from mediapipe.tasks.python import BaseOptions, vision
 
 from app.config.settings import DetectionSettings, ModelSettings
 from app.vision import ensure_model
+
+logger = logging.getLogger(__name__)
 
 
 class PoseLandmark(IntEnum):
@@ -42,6 +45,7 @@ class PoseDetector:
             min_pose_presence_confidence=detection.min_pose_confidence,
         )
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
+        logger.info("Pose landmarker ready (%s)", model_path)
 
     def detect(self, frame_bgr: np.ndarray, timestamp_ms: int) -> PoseResult:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)

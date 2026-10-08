@@ -39,6 +39,8 @@ class UserSettings:
     sound_volume: int = 40  # percent
     show_state_timers: bool = True
     language: str = "en"
+    # Draw face/pose/phone markers on the camera preview (detection runs either way).
+    show_landmarks: bool = False
 
     def normalized(self) -> "UserSettings":
         """Clamp every field into its valid range."""
@@ -160,7 +162,8 @@ def default_settings_path() -> Path:
 def load_user_settings(path: Path) -> UserSettings:
     """Return the saved settings, or defaults if the file is missing or unreadable."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # utf-8-sig: tolerate a byte-order mark added by some Windows editors.
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return UserSettings()
     except (OSError, ValueError):

@@ -274,6 +274,12 @@ class SettingsDialog(QDialog):
         self._sound_box = QGroupBox()
         self._sound_box.setLayout(sound_form)
 
+        # Display.
+        self._show_landmarks = QCheckBox()
+        self._show_landmarks.setChecked(user.show_landmarks)
+        self._display_box = QGroupBox()
+        QVBoxLayout(self._display_box).addWidget(self._show_landmarks)
+
         # Language.
         self._language = _language_combo(user.language)
         self._language.currentIndexChanged.connect(self._on_language)
@@ -297,6 +303,7 @@ class SettingsDialog(QDialog):
         right.setSpacing(14)
         right.addWidget(self._detection_box)
         right.addWidget(self._sound_box)
+        right.addWidget(self._display_box)
         right.addWidget(self._language_box)
         right.addStretch(1)
         right_widget = QWidget()
@@ -328,6 +335,9 @@ class SettingsDialog(QDialog):
         self._detection_box.setTitle(tr("settings.detection"))
         self._sound_box.setTitle(tr("settings.sound"))
         self._language_box.setTitle(tr("settings.language"))
+        self._display_box.setTitle(tr("settings.display"))
+        self._show_landmarks.setText(tr("settings.show_landmarks"))
+        self._show_landmarks.setToolTip(tr("settings.show_landmarks_tip"))
         for key, label in self._labels.items():
             label.setText(tr(key))
         for field in (self._distraction, self._phone, self._no_movement):
@@ -370,4 +380,5 @@ class SettingsDialog(QDialog):
             sound_enabled=self._sound_enabled.isChecked(),
             sound_volume=self._volume.value(),
             language=self._language.currentData(),
+            show_landmarks=self._show_landmarks.isChecked(),
         ).normalized()
